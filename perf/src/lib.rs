@@ -1,5 +1,8 @@
+#![cfg_attr(RUSTC_WITH_SPECIALIZATION, feature(min_specialization))]
 pub mod cuda_runtime;
 pub mod data_budget;
+pub mod deduper;
+pub mod discard;
 pub mod packet;
 pub mod perf_libs;
 pub mod recycler;
@@ -16,17 +19,20 @@ extern crate log;
 
 #[cfg(test)]
 #[macro_use]
-extern crate matches;
+extern crate assert_matches;
 
 #[macro_use]
 extern crate solana_metrics;
+
+#[macro_use]
+extern crate solana_frozen_abi_macro;
 
 fn is_rosetta_emulated() -> bool {
     #[cfg(target_os = "macos")]
     {
         use std::str::FromStr;
         std::process::Command::new("sysctl")
-            .args(&["-in", "sysctl.proc_translated"])
+            .args(["-in", "sysctl.proc_translated"])
             .output()
             .map_err(|_| ())
             .and_then(|output| String::from_utf8(output.stdout).map_err(|_| ()))

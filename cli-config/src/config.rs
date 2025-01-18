@@ -18,14 +18,14 @@ lazy_static! {
     /// [lazy_static]: https://docs.rs/lazy_static
     pub static ref CONFIG_FILE: Option<String> = {
         dirs_next::home_dir().map(|mut path| {
-            path.extend(&[".config", "solana", "cli", "config.yml"]);
+            path.extend([".config", "solana", "cli", "config.yml"]);
             path.to_str().unwrap().to_string()
         })
     };
 }
 
 /// The Solana CLI configuration.
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct Config {
     /// The RPC address of a Solana validator node.
     ///
@@ -34,7 +34,7 @@ pub struct Config {
     ///
     /// For local testing, the typical value is `http://localhost:8899`.
     ///
-    /// [rpcdocs]: https://docs.solana.com/cluster/rpc-endpoints
+    /// [rpcdocs]: https://solana.com/docs/core/clusters
     pub json_rpc_url: String,
     /// The address to connect to for receiving event notifications.
     ///
@@ -70,7 +70,7 @@ impl Default for Config {
     fn default() -> Self {
         let keypair_path = {
             let mut keypair_path = dirs_next::home_dir().expect("home directory");
-            keypair_path.extend(&[".config", "solana", "id.json"]);
+            keypair_path.extend([".config", "solana", "id.json"]);
             keypair_path.to_str().unwrap().to_string()
         };
         let json_rpc_url = "https://api.mainnet-beta.solana.com".to_string();

@@ -1,6 +1,8 @@
 use {
     crate::{
-        instruction::InstructionError, message::SanitizeMessageError, sanitize::SanitizeError,
+        instruction::InstructionError,
+        message::{AddressLoaderError, SanitizeMessageError},
+        sanitize::SanitizeError,
     },
     serde::Serialize,
     thiserror::Error,
@@ -137,6 +139,36 @@ pub enum TransactionError {
     /// Transaction would exceed total account data limit
     #[error("Transaction would exceed total account data limit")]
     WouldExceedAccountDataTotalLimit,
+
+    /// Transaction contains a duplicate instruction that is not allowed
+    #[error("Transaction contains a duplicate instruction ({0}) that is not allowed")]
+    DuplicateInstruction(u8),
+
+    /// Transaction results in an account with insufficient funds for rent
+    #[error(
+        "Transaction results in an account ({account_index}) with insufficient funds for rent"
+    )]
+    InsufficientFundsForRent { account_index: u8 },
+
+    /// Transaction exceeded max loaded accounts data size cap
+    #[error("Transaction exceeded max loaded accounts data size cap")]
+    MaxLoadedAccountsDataSizeExceeded,
+
+    /// LoadedAccountsDataSizeLimit set for transaction must be greater than 0.
+    #[error("LoadedAccountsDataSizeLimit set for transaction must be greater than 0.")]
+    InvalidLoadedAccountsDataSizeLimit,
+
+    /// Sanitized transaction differed before/after feature activiation. Needs to be resanitized.
+    #[error("ResanitizationNeeded")]
+    ResanitizationNeeded,
+
+    /// Program execution is temporarily restricted on an account.
+    #[error("Execution of the program referenced by account at index {account_index} is temporarily restricted.")]
+    ProgramExecutionTemporarilyRestricted { account_index: u8 },
+
+    /// The total balance before the transaction does not equal the total balance after the transaction
+    #[error("Sum of account balances before and after transaction do not match")]
+    UnbalancedTransaction,
 }
 
 impl From<SanitizeError> for TransactionError {
@@ -146,37 +178,23 @@ impl From<SanitizeError> for TransactionError {
 }
 
 impl From<SanitizeMessageError> for TransactionError {
-    fn from(_err: SanitizeMessageError) -> Self {
-        Self::SanitizeFailure
+    fn from(err: SanitizeMessageError) -> Self {
+        match err {
+            SanitizeMessageError::AddressLoaderError(err) => Self::from(err),
+            _ => Self::SanitizeFailure,
+        }
     }
 }
 
-#[derive(Debug, Error, PartialEq, Eq, Clone)]
-pub enum AddressLookupError {
-    /// Attempted to lookup addresses from a table that does not exist
-    #[error("Attempted to lookup addresses from a table that does not exist")]
-    LookupTableAccountNotFound,
-
-    /// Attempted to lookup addresses from an account owned by the wrong program
-    #[error("Attempted to lookup addresses from an account owned by the wrong program")]
-    InvalidAccountOwner,
-
-    /// Attempted to lookup addresses from an invalid account
-    #[error("Attempted to lookup addresses from an invalid account")]
-    InvalidAccountData,
-
-    /// Address lookup contains an invalid index
-    #[error("Address lookup contains an invalid index")]
-    InvalidLookupIndex,
-}
-
-impl From<AddressLookupError> for TransactionError {
-    fn from(err: AddressLookupError) -> Self {
+impl From<AddressLoaderError> for TransactionError {
+    fn from(err: AddressLoaderError) -> Self {
         match err {
-            AddressLookupError::LookupTableAccountNotFound => Self::AddressLookupTableNotFound,
-            AddressLookupError::InvalidAccountOwner => Self::InvalidAddressLookupTableOwner,
-            AddressLookupError::InvalidAccountData => Self::InvalidAddressLookupTableData,
-            AddressLookupError::InvalidLookupIndex => Self::InvalidAddressLookupTableIndex,
+            AddressLoaderError::Disabled => Self::UnsupportedVersion,
+            AddressLoaderError::SlotHashesSysvarNotFound => Self::AccountNotFound,
+            AddressLoaderError::LookupTableAccountNotFound => Self::AddressLookupTableNotFound,
+            AddressLoaderError::InvalidAccountOwner => Self::InvalidAddressLookupTableOwner,
+            AddressLoaderError::InvalidAccountData => Self::InvalidAddressLookupTableData,
+            AddressLoaderError::InvalidLookupIndex => Self::InvalidAddressLookupTableIndex,
         }
     }
 }

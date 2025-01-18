@@ -34,7 +34,7 @@ fi
 
 coverageFlags=()
 coverageFlags+=(-Zprofile)               # Enable coverage
-coverageFlags+=("-Aincomplete_features") # Supress warnings due to frozen abi, which is harmless for it
+coverageFlags+=("-Aincomplete_features") # Suppress warnings due to frozen abi, which is harmless for it
 if [[ $(uname) != Darwin ]]; then        # macOS skipped due to https://github.com/rust-lang/rust/issues/63047
   coverageFlags+=("-Clink-dead-code")    # Dead code should appear red in the report
 fi
@@ -69,10 +69,8 @@ if [[ -n $CI || -z $1 ]]; then
     $(git grep -l "proc-macro.*true" :**/Cargo.toml | sed 's|Cargo.toml|src/lib.rs|')
 fi
 
-# limit jobs to 4gb/thread
-JOBS=$(grep MemTotal /proc/meminfo | awk '{printf "%.0f", ($2 / (4 * 1024 * 1024))}')
-NPROC=$(nproc)
-JOBS=$((JOBS>NPROC ? NPROC : JOBS))
+#shellcheck source=ci/common/limit-threads.sh
+source ci/common/limit-threads.sh
 
 RUST_LOG=solana=trace _ "$cargo" nightly test --jobs "$JOBS" --target-dir target/cov --no-run "${packages[@]}"
 if RUST_LOG=solana=trace _ "$cargo" nightly test --jobs "$JOBS" --target-dir target/cov "${packages[@]}" 2> target/cov/coverage-stderr.log; then

@@ -1,31 +1,54 @@
 //! Errors related to proving and verifying proofs.
 use {
-    crate::{range_proof::errors::RangeProofError, sigma_proofs::errors::*},
+    crate::{
+        encryption::elgamal::ElGamalError,
+        range_proof::errors::{RangeProofGenerationError, RangeProofVerificationError},
+        sigma_proofs::errors::*,
+    },
     thiserror::Error,
 };
 
 #[derive(Error, Clone, Debug, Eq, PartialEq)]
-pub enum ProofError {
-    #[error("proof generation failed")]
-    Generation,
-    #[error("proof failed to verify")]
-    Verification,
-    #[error("range proof failed to verify")]
-    RangeProof,
-    #[error("equality proof failed to verify")]
+pub enum ProofGenerationError {
+    #[error("not enough funds in account")]
+    NotEnoughFunds,
+    #[error("transfer fee calculation error")]
+    FeeCalculation,
+    #[error("illegal number of commitments")]
+    IllegalCommitmentLength,
+    #[error("illegal amount bit length")]
+    IllegalAmountBitLength,
+    #[error("invalid commitment")]
+    InvalidCommitment,
+    #[error("range proof generation failed")]
+    RangeProof(#[from] RangeProofGenerationError),
+    #[error("unexpected proof length")]
+    ProofLength,
+}
+
+#[derive(Error, Clone, Debug, Eq, PartialEq)]
+pub enum ProofVerificationError {
+    #[error("range proof verification failed")]
+    RangeProof(#[from] RangeProofVerificationError),
+    #[error("sigma proof verification failed")]
+    SigmaProof(SigmaProofType, SigmaProofVerificationError),
+    #[error("ElGamal ciphertext or public key error")]
+    ElGamal(#[from] ElGamalError),
+    #[error("Invalid proof context")]
+    ProofContext,
+    #[error("illegal commitment length")]
+    IllegalCommitmentLength,
+    #[error("illegal amount bit length")]
+    IllegalAmountBitLength,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SigmaProofType {
     EqualityProof,
-    #[error("fee proof failed to verify")]
-    FeeProof,
-    #[error("zero-balance proof failed to verify")]
-    ZeroBalanceProof,
-    #[error("validity proof failed to verify")]
     ValidityProof,
-    #[error(
-        "`zk_token_elgamal::pod::ElGamalCiphertext` contains invalid ElGamalCiphertext ciphertext"
-    )]
-    InconsistentCTData,
-    #[error("failed to decrypt ciphertext from transfer data")]
-    Decryption,
+    ZeroBalanceProof,
+    FeeSigmaProof,
+    PubkeyValidityProof,
 }
 
 #[derive(Error, Clone, Debug, Eq, PartialEq)]
@@ -34,31 +57,31 @@ pub enum TranscriptError {
     ValidationError,
 }
 
-impl From<RangeProofError> for ProofError {
-    fn from(_err: RangeProofError) -> Self {
-        Self::RangeProof
+impl From<EqualityProofVerificationError> for ProofVerificationError {
+    fn from(err: EqualityProofVerificationError) -> Self {
+        Self::SigmaProof(SigmaProofType::EqualityProof, err.0)
     }
 }
 
-impl From<EqualityProofError> for ProofError {
-    fn from(_err: EqualityProofError) -> Self {
-        Self::EqualityProof
+impl From<FeeSigmaProofVerificationError> for ProofVerificationError {
+    fn from(err: FeeSigmaProofVerificationError) -> Self {
+        Self::SigmaProof(SigmaProofType::FeeSigmaProof, err.0)
     }
 }
 
-impl From<FeeSigmaProofError> for ProofError {
-    fn from(_err: FeeSigmaProofError) -> Self {
-        Self::FeeProof
+impl From<ZeroBalanceProofVerificationError> for ProofVerificationError {
+    fn from(err: ZeroBalanceProofVerificationError) -> Self {
+        Self::SigmaProof(SigmaProofType::ZeroBalanceProof, err.0)
+    }
+}
+impl From<ValidityProofVerificationError> for ProofVerificationError {
+    fn from(err: ValidityProofVerificationError) -> Self {
+        Self::SigmaProof(SigmaProofType::ValidityProof, err.0)
     }
 }
 
-impl From<ZeroBalanceProofError> for ProofError {
-    fn from(_err: ZeroBalanceProofError) -> Self {
-        Self::ZeroBalanceProof
-    }
-}
-impl From<ValidityProofError> for ProofError {
-    fn from(_err: ValidityProofError) -> Self {
-        Self::ValidityProof
+impl From<PubkeyValidityProofVerificationError> for ProofVerificationError {
+    fn from(err: PubkeyValidityProofVerificationError) -> Self {
+        Self::SigmaProof(SigmaProofType::PubkeyValidityProof, err.0)
     }
 }

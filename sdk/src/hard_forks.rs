@@ -1,5 +1,5 @@
-//! The `hard_forks` module is used to maintain the list of slot boundaries for when a hard fork
-//! should occur.
+//! The list of slot boundaries at which a hard fork should
+//! occur.
 
 #![cfg(feature = "full")]
 
@@ -31,6 +31,11 @@ impl HardForks {
     // Returns a sorted-by-slot iterator over the registered hark forks
     pub fn iter(&self) -> std::slice::Iter<(Slot, usize)> {
         self.hard_forks.iter()
+    }
+
+    // Returns `true` is there are currently no registered hard forks
+    pub fn is_empty(&self) -> bool {
+        self.hard_forks.is_empty()
     }
 
     // Returns data to include in the bank hash for the given slot if a hard fork is scheduled

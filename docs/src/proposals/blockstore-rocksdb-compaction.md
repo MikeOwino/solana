@@ -22,7 +22,7 @@ required for storing each entry.  In other words, RocksDB uses compactions
 to balance [write, space, and read amplifications](https://smalldatum.blogspot.com/2015/11/read-write-space-amplification-pick-2_23.html).
 
 As different workloads have different requirements, RocksDB makes its options
-highly configerable.  However, it also means its default settings might not
+highly configurable.  However, it also means its default settings might not
 be always suitable.  This document focuses on RocksDB's compaction
 optimization for Solana's Blockstore.
 
@@ -95,7 +95,7 @@ As mentioned above, shred data column families, ShredData and ShredCode, which
 contribute to 99% of the storage size in shred insertion, have an unique write
 workload where write-keys are mostly monotonically increasing over time.  As a
 result, after entries are flushed from memory into SST files, the keys are
-naturally sorted accross multiple SST files where each SST file might have
+naturally sorted across multiple SST files where each SST file might have
 a small overlapping key range between at most two other SST files.  In other
 words, files are sorted naturally from old to new, which allows us to use
 the First-In-First-Out compaction, or FIFO Compaction.
@@ -103,13 +103,13 @@ the First-In-First-Out compaction, or FIFO Compaction.
 FIFO Compaction actually does not compact files.  Instead, it simply deletes
 the oldest files when the storage size reaches the specified threshold.  As a
 result, it has a constant 1 write amplification.  In addition, as keys are
-naturally sorted accross multiple SST files, each read can be answered by
+naturally sorted across multiple SST files, each read can be answered by
 hitting mostly only one (or in the boundary case, two) file.  This gives us
 close to 1 read amplification.  As each key is only inserted once, we have
 space amplification 1.
 
 ### Use Current Settings for Metadata Column Families
-The second type of the column families related to shred insertion is medadata
+The second type of the column families related to shred insertion is metadata
 column families.  These metadata column families contributes ~1% of the shred
 insertion data in size.  The largest metadata column family here is the Index
 column family, which occupies 0.8% of the shred insertion data.
@@ -160,7 +160,7 @@ in Solana's BlockStore use case:
 Here we discuss Level to FIFO and FIFO to Level migrations:
 
 ### Level to FIFO
-heoretically, FIFO compaction is the superset of all other compaction styles,
+Theoretically, FIFO compaction is the superset of all other compaction styles,
 as it does not have any assumption of the LSM tree structure.  However, the
 current RocksDB implementation does not offer such flexibility while it is
 theoretically doable.

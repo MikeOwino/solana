@@ -2,73 +2,48 @@
 use {crate::errors::TranscriptError, thiserror::Error};
 
 #[derive(Error, Clone, Debug, Eq, PartialEq)]
-pub enum EqualityProofError {
-    #[error("the required algebraic relation does not hold")]
+pub enum SigmaProofVerificationError {
+    #[error("required algebraic relation does not hold")]
     AlgebraicRelation,
     #[error("malformed proof")]
-    Format,
+    Deserialization,
     #[error("multiscalar multiplication failed")]
     MultiscalarMul,
     #[error("transcript failed to produce a challenge")]
-    Transcript,
+    Transcript(#[from] TranscriptError),
 }
 
-impl From<TranscriptError> for EqualityProofError {
-    fn from(_err: TranscriptError) -> Self {
-        Self::Transcript
-    }
+macro_rules! impl_from_transcript_error {
+    ($sigma_error_type:ty) => {
+        impl From<TranscriptError> for $sigma_error_type {
+            fn from(err: TranscriptError) -> Self {
+                SigmaProofVerificationError::Transcript(err).into()
+            }
+        }
+    };
 }
 
 #[derive(Error, Clone, Debug, Eq, PartialEq)]
-pub enum ValidityProofError {
-    #[error("the required algebraic relation does not hold")]
-    AlgebraicRelation,
-    #[error("malformed proof")]
-    Format,
-    #[error("multiscalar multiplication failed")]
-    MultiscalarMul,
-    #[error("transcript failed to produce a challenge")]
-    Transcript,
-}
-
-impl From<TranscriptError> for ValidityProofError {
-    fn from(_err: TranscriptError) -> Self {
-        Self::Transcript
-    }
-}
+#[error("equality proof verification failed: {0}")]
+pub struct EqualityProofVerificationError(#[from] pub(crate) SigmaProofVerificationError);
+impl_from_transcript_error!(EqualityProofVerificationError);
 
 #[derive(Error, Clone, Debug, Eq, PartialEq)]
-pub enum ZeroBalanceProofError {
-    #[error("the required algebraic relation does not hold")]
-    AlgebraicRelation,
-    #[error("malformed proof")]
-    Format,
-    #[error("multiscalar multiplication failed")]
-    MultiscalarMul,
-    #[error("transcript failed to produce a challenge")]
-    Transcript,
-}
-
-impl From<TranscriptError> for ZeroBalanceProofError {
-    fn from(_err: TranscriptError) -> Self {
-        Self::Transcript
-    }
-}
+#[error("validity proof verification failed: {0}")]
+pub struct ValidityProofVerificationError(#[from] pub(crate) SigmaProofVerificationError);
+impl_from_transcript_error!(ValidityProofVerificationError);
 
 #[derive(Error, Clone, Debug, Eq, PartialEq)]
-pub enum FeeSigmaProofError {
-    #[error("the required algebraic relation does not hold")]
-    AlgebraicRelation,
-    #[error("malformed proof")]
-    Format,
-    #[error("multiscalar multiplication failed")]
-    MultiscalarMul,
-    #[error("transcript failed to produce a challenge")]
-    Transcript,
-}
+#[error("zero-balance proof verification failed: {0}")]
+pub struct ZeroBalanceProofVerificationError(#[from] pub(crate) SigmaProofVerificationError);
+impl_from_transcript_error!(ZeroBalanceProofVerificationError);
 
-impl From<TranscriptError> for FeeSigmaProofError {
-    fn from(_err: TranscriptError) -> Self {
-        Self::Transcript
-    }
-}
+#[derive(Error, Clone, Debug, Eq, PartialEq)]
+#[error("fee sigma proof verification failed: {0}")]
+pub struct FeeSigmaProofVerificationError(#[from] pub(crate) SigmaProofVerificationError);
+impl_from_transcript_error!(FeeSigmaProofVerificationError);
+
+#[derive(Error, Clone, Debug, Eq, PartialEq)]
+#[error("public key validity proof verification failed: {0}")]
+pub struct PubkeyValidityProofVerificationError(#[from] pub(crate) SigmaProofVerificationError);
+impl_from_transcript_error!(PubkeyValidityProofVerificationError);

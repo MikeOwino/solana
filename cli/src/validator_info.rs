@@ -3,7 +3,7 @@ use {
         cli::{CliCommand, CliCommandInfo, CliConfig, CliError, ProcessResult},
         spend_utils::{resolve_spend_tx_and_check_account_balance, SpendAmount},
     },
-    bincode::deserialize,
+    bincode::{deserialize, serialized_size},
     clap::{App, AppSettings, Arg, ArgMatches, SubCommand},
     reqwest::blocking::Client,
     serde_json::{Map, Value},
@@ -11,14 +11,15 @@ use {
         self, ValidatorInfo, MAX_LONG_FIELD_LENGTH, MAX_SHORT_FIELD_LENGTH,
     },
     solana_clap_utils::{
+        hidden_unless_forced,
         input_parsers::pubkey_of,
         input_validators::{is_pubkey, is_url},
         keypair::DefaultSigner,
     },
     solana_cli_output::{CliValidatorInfo, CliValidatorInfoVec},
-    solana_client::rpc_client::RpcClient,
     solana_config_program::{config_instruction, get_config_data, ConfigKeys, ConfigState},
     solana_remote_wallet::remote_wallet::RemoteWalletManager,
+    solana_rpc_client::rpc_client::RpcClient,
     solana_sdk::{
         account::Account,
         message::Message,
@@ -26,15 +27,27 @@ use {
         signature::{Keypair, Signer},
         transaction::Transaction,
     },
-    std::{error, sync::Arc},
+    std::{error, rc::Rc},
 };
 
 // Return an error if a validator details are longer than the max length.
 pub fn check_details_length(string: String) -> Result<(), String> {
     if string.len() > MAX_LONG_FIELD_LENGTH {
         Err(format!(
-            "validator details longer than {:?}-byte limit",
-            MAX_LONG_FIELD_LENGTH
+            "validator details longer than {MAX_LONG_FIELD_LENGTH:?}-byte limit"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+pub fn check_total_length(info: &ValidatorInfo) -> Result<(), String> {
+    let size = serialized_size(&info).unwrap();
+    let limit = ValidatorInfo::max_space();
+
+    if size > limit {
+        Err(format!(
+            "Total size {size:?} exceeds limit of {limit:?} bytes"
         ))
     } else {
         Ok(())
@@ -46,8 +59,7 @@ pub fn check_url(string: String) -> Result<(), String> {
     is_url(string.clone())?;
     if string.len() > MAX_SHORT_FIELD_LENGTH {
         Err(format!(
-            "url longer than {:?}-byte limit",
-            MAX_SHORT_FIELD_LENGTH
+            "url longer than {MAX_SHORT_FIELD_LENGTH:?}-byte limit"
         ))
     } else {
         Ok(())
@@ -58,8 +70,7 @@ pub fn check_url(string: String) -> Result<(), String> {
 pub fn is_short_field(string: String) -> Result<(), String> {
     if string.len() > MAX_SHORT_FIELD_LENGTH {
         Err(format!(
-            "validator field longer than {:?}-byte limit",
-            MAX_SHORT_FIELD_LENGTH
+            "validator field longer than {MAX_SHORT_FIELD_LENGTH:?}-byte limit"
         ))
     } else {
         Ok(())
@@ -71,22 +82,20 @@ fn verify_keybase(
     keybase_username: &Value,
 ) -> Result<(), Box<dyn error::Error>> {
     if let Some(keybase_username) = keybase_username.as_str() {
-        let url = format!(
-            "https://keybase.pub/{}/solana/validator-{:?}",
-            keybase_username, validator_pubkey
-        );
+        let url =
+            format!("https://keybase.pub/{keybase_username}/solana/validator-{validator_pubkey:?}");
         let client = Client::new();
         if client.head(&url).send()?.status().is_success() {
             Ok(())
         } else {
-            Err(format!("keybase_username could not be confirmed at: {}. Please add this pubkey file to your keybase profile to connect", url).into())
+            Err(format!(
+                "keybase_username could not be confirmed at: {url}. Please add this pubkey file \
+                 to your keybase profile to connect"
+            )
+            .into())
         }
     } else {
-        Err(format!(
-            "keybase_username could not be parsed as String: {}",
-            keybase_username
-        )
-        .into())
+        Err(format!("keybase_username could not be parsed as String: {keybase_username}").into())
     }
 }
 
@@ -98,6 +107,10 @@ fn parse_args(matches: &ArgMatches<'_>) -> Value {
     );
     if let Some(url) = matches.value_of("website") {
         map.insert("website".to_string(), Value::String(url.to_string()));
+    }
+
+    if let Some(icon_url) = matches.value_of("icon_url") {
+        map.insert("iconUrl".to_string(), Value::String(icon_url.to_string()));
     }
     if let Some(details) = matches.value_of("details") {
         map.insert("details".to_string(), Value::String(details.to_string()));
@@ -116,7 +129,7 @@ fn parse_validator_info(
     account: &Account,
 ) -> Result<(Pubkey, Map<String, serde_json::value::Value>), Box<dyn error::Error>> {
     if account.owner != solana_config_program::id() {
-        return Err(format!("{} is not a validator info account", pubkey).into());
+        return Err(format!("{pubkey} is not a validator info account").into());
     }
     let key_list: ConfigKeys = deserialize(&account.data)?;
     if !key_list.keys.is_empty() {
@@ -125,7 +138,7 @@ fn parse_validator_info(
         let validator_info: Map<_, _> = serde_json::from_str(&validator_info_string)?;
         Ok((validator_pubkey, validator_info))
     } else {
-        Err(format!("{} could not be parsed as a validator info account", pubkey).into())
+        Err(format!("{pubkey} could not be parsed as a validator info account").into())
     }
 }
 
@@ -170,12 +183,22 @@ impl ValidatorInfoSubCommands for App<'_, '_> {
                                 .help("Validator website url"),
                         )
                         .arg(
+                            Arg::with_name("icon_url")
+                                .short("i")
+                                .long("icon-url")
+                                .value_name("URL")
+                                .takes_value(true)
+                                .validator(check_url)
+                                .help("Validator icon URL"),
+                        )
+                        .arg(
                             Arg::with_name("keybase_username")
                                 .short("n")
                                 .long("keybase")
                                 .value_name("USERNAME")
                                 .takes_value(true)
                                 .validator(is_short_field)
+                                .hidden(hidden_unless_forced()) // Being phased out
                                 .help("Validator Keybase username"),
                         )
                         .arg(
@@ -185,13 +208,13 @@ impl ValidatorInfoSubCommands for App<'_, '_> {
                                 .value_name("DETAILS")
                                 .takes_value(true)
                                 .validator(check_details_length)
-                                .help("Validator description")
+                                .help("Validator description"),
                         )
                         .arg(
                             Arg::with_name("force")
                                 .long("force")
                                 .takes_value(false)
-                                .hidden(true) // Don't document this argument to discourage its use
+                                .hidden(hidden_unless_forced()) // Don't document this argument to discourage its use
                                 .help("Override keybase username validity check"),
                         ),
                 )
@@ -204,9 +227,12 @@ impl ValidatorInfoSubCommands for App<'_, '_> {
                                 .value_name("PUBKEY")
                                 .takes_value(true)
                                 .validator(is_pubkey)
-                                .help("The pubkey of the Validator info account; without this argument, returns all"),
+                                .help(
+                                    "The pubkey of the Validator info account; without this \
+                                     argument, returns all Validator info accounts",
+                                ),
                         ),
-                )
+                ),
         )
     }
 }
@@ -214,7 +240,7 @@ impl ValidatorInfoSubCommands for App<'_, '_> {
 pub fn parse_validator_info_command(
     matches: &ArgMatches<'_>,
     default_signer: &DefaultSigner,
-    wallet_manager: &mut Option<Arc<RemoteWalletManager>>,
+    wallet_manager: &mut Option<Rc<RemoteWalletManager>>,
 ) -> Result<CliCommandInfo, CliError> {
     let info_pubkey = pubkey_of(matches, "info_pubkey");
     // Prepare validator info
@@ -248,13 +274,13 @@ pub fn process_set_validator_info(
 ) -> ProcessResult {
     // Validate keybase username
     if let Some(string) = validator_info.get("keybaseUsername") {
-        let result = verify_keybase(&config.signers[0].pubkey(), string);
-        if result.is_err() {
-            if force_keybase {
-                println!("--force supplied, ignoring: {:?}", result);
-            } else {
+        if force_keybase {
+            println!("--force supplied, skipping Keybase verification");
+        } else {
+            let result = verify_keybase(&config.signers[0].pubkey(), string);
+            if result.is_err() {
                 result.map_err(|err| {
-                    CliError::BadParameter(format!("Invalid validator keybase username: {}", err))
+                    CliError::BadParameter(format!("Invalid validator keybase username: {err}"))
                 })?;
             }
         }
@@ -263,6 +289,14 @@ pub fn process_set_validator_info(
     let validator_info = ValidatorInfo {
         info: validator_string,
     };
+
+    let result = check_total_length(&validator_info);
+    if result.is_err() {
+        result.map_err(|err| {
+            CliError::BadParameter(format!("Maximum size for validator info: {err}"))
+        })?;
+    }
+
     // Check for existing validator-info account
     let all_config = rpc_client.get_program_accounts(&solana_config_program::id())?;
     let existing_account = all_config
@@ -300,10 +334,7 @@ pub fn process_set_validator_info(
 
     let signers = if balance == 0 {
         if info_pubkey != info_keypair.pubkey() {
-            println!(
-                "Account {:?} does not exist. Generating new keypair...",
-                info_pubkey
-            );
+            println!("Account {info_pubkey:?} does not exist. Generating new keypair...");
             info_pubkey = info_keypair.pubkey();
         }
         vec![config.signers[0], &info_keypair]
@@ -362,8 +393,8 @@ pub fn process_set_validator_info(
     tx.try_sign(&signers, latest_blockhash)?;
     let signature_str = rpc_client.send_and_confirm_transaction_with_spinner(&tx)?;
 
-    println!("Success! Validator info published at: {:?}", info_pubkey);
-    println!("{}", signature_str);
+    println!("Success! Validator info published at: {info_pubkey:?}");
+    println!("{signature_str}");
     Ok("".to_string())
 }
 
@@ -428,8 +459,7 @@ mod tests {
         assert_eq!(
             check_details_length(long_details),
             Err(format!(
-                "validator details longer than {:?}-byte limit",
-                MAX_LONG_FIELD_LENGTH
+                "validator details longer than {MAX_LONG_FIELD_LENGTH:?}-byte limit"
             ))
         );
     }
@@ -438,7 +468,7 @@ mod tests {
     fn test_check_url() {
         let url = "http://test.com";
         assert_eq!(check_url(url.to_string()), Ok(()));
-        let long_url = "http://7cLvFwLCbyHuXQ1RGzhCMobAWYPMSZ3VbUml1qWi1nkc3FD7zj9hzTZzMvYJ.com";
+        let long_url = "http://7cLvFwLCbyHuXQ1RGzhCMobAWYPMSZ3VbUml1CMobAWYPMSZ3VbUml1qWi1nkc3FD7zj9hzTZzMvYJ.com";
         assert!(check_url(long_url.to_string()).is_err());
         let non_url = "not parseable";
         assert!(check_url(non_url.to_string()).is_err());
@@ -448,7 +478,7 @@ mod tests {
     fn test_is_short_field() {
         let name = "Alice Validator";
         assert_eq!(is_short_field(name.to_string()), Ok(()));
-        let long_name = "Alice 7cLvFwLCbyHuXQ1RGzhCMobAWYPMSZ3VbUml1qWi1nkc3FD7zj9hzTZzMvYJt6rY9";
+        let long_name = "Alice 7cLvFwLCbyHuXQ1RGzhCMobAWYPMSZ3VbUml1qWi1nkc3FD7zj9hzTZzMvYJt6rY9j9hzTZzMvYJt6rY9";
         assert!(is_short_field(long_name.to_string()).is_err());
     }
 
@@ -472,6 +502,8 @@ mod tests {
             "Alice",
             "-n",
             "alice_keybase",
+            "-i",
+            "https://test.com/icon.png",
         ]);
         let subcommand_matches = matches.subcommand();
         assert_eq!(subcommand_matches.0, "validator-info");
@@ -483,6 +515,7 @@ mod tests {
         let expected = json!({
             "name": "Alice",
             "keybaseUsername": "alice_keybase",
+            "iconUrl": "https://test.com/icon.png",
         });
         assert_eq!(parse_args(matches), expected);
     }
@@ -581,7 +614,12 @@ mod tests {
         let max_short_string =
             "Max Length String KWpP299aFCBWvWg1MHpSuaoTsud7cv8zMJsh99aAtP8X1s26yrR1".to_string();
         // 300-character string
-        let max_long_string = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Ut libero quam, volutpat et aliquet eu, varius in mi. Aenean vestibulum ex in tristique faucibus. Maecenas in imperdiet turpis. Nullam feugiat aliquet erat. Morbi malesuada turpis sed dui pulvinar lobortis. Pellentesque a lectus eu leo nullam.".to_string();
+        let max_long_string = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Ut libero \
+                               quam, volutpat et aliquet eu, varius in mi. Aenean vestibulum ex \
+                               in tristique faucibus. Maecenas in imperdiet turpis. Nullam \
+                               feugiat aliquet erat. Morbi malesuada turpis sed dui pulvinar \
+                               lobortis. Pellentesque a lectus eu leo nullam."
+            .to_string();
         let mut info = Map::new();
         info.insert("name".to_string(), Value::String(max_short_string.clone()));
         info.insert(

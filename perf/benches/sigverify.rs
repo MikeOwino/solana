@@ -15,6 +15,7 @@ use {
 };
 
 const NUM: usize = 256;
+const LARGE_BATCH_PACKET_COUNT: usize = 128;
 
 #[bench]
 fn bench_sigverify_simple(bencher: &mut Bencher) {
@@ -31,8 +32,96 @@ fn bench_sigverify_simple(bencher: &mut Bencher) {
     let recycler_out = Recycler::default();
     // verify packets
     bencher.iter(|| {
-        let _ans =
-            sigverify::ed25519_verify(&mut batches, &recycler, &recycler_out, false, num_packets);
+        sigverify::ed25519_verify(&mut batches, &recycler, &recycler_out, false, num_packets);
+    })
+}
+
+fn gen_batches(
+    use_same_tx: bool,
+    packets_per_batch: usize,
+    total_packets: usize,
+) -> Vec<PacketBatch> {
+    if use_same_tx {
+        let tx = test_tx();
+        to_packet_batches(&vec![tx; total_packets], packets_per_batch)
+    } else {
+        let txs: Vec<_> = std::iter::repeat_with(test_tx)
+            .take(total_packets)
+            .collect();
+        to_packet_batches(&txs, packets_per_batch)
+    }
+}
+
+#[bench]
+#[ignore]
+fn bench_sigverify_low_packets_small_batch(bencher: &mut Bencher) {
+    let num_packets = sigverify::VERIFY_PACKET_CHUNK_SIZE - 1;
+    let mut batches = gen_batches(false, 1, num_packets);
+    let recycler = Recycler::default();
+    let recycler_out = Recycler::default();
+    bencher.iter(|| {
+        sigverify::ed25519_verify(&mut batches, &recycler, &recycler_out, false, num_packets);
+    })
+}
+
+#[bench]
+#[ignore]
+fn bench_sigverify_low_packets_large_batch(bencher: &mut Bencher) {
+    let num_packets = sigverify::VERIFY_PACKET_CHUNK_SIZE - 1;
+    let mut batches = gen_batches(false, LARGE_BATCH_PACKET_COUNT, num_packets);
+    let recycler = Recycler::default();
+    let recycler_out = Recycler::default();
+    bencher.iter(|| {
+        sigverify::ed25519_verify(&mut batches, &recycler, &recycler_out, false, num_packets);
+    })
+}
+
+#[bench]
+#[ignore]
+fn bench_sigverify_medium_packets_small_batch(bencher: &mut Bencher) {
+    let num_packets = sigverify::VERIFY_PACKET_CHUNK_SIZE * 8;
+    let mut batches = gen_batches(false, 1, num_packets);
+    let recycler = Recycler::default();
+    let recycler_out = Recycler::default();
+    bencher.iter(|| {
+        sigverify::ed25519_verify(&mut batches, &recycler, &recycler_out, false, num_packets);
+    })
+}
+
+#[bench]
+#[ignore]
+fn bench_sigverify_medium_packets_large_batch(bencher: &mut Bencher) {
+    let num_packets = sigverify::VERIFY_PACKET_CHUNK_SIZE * 8;
+    let mut batches = gen_batches(false, LARGE_BATCH_PACKET_COUNT, num_packets);
+    let recycler = Recycler::default();
+    let recycler_out = Recycler::default();
+    bencher.iter(|| {
+        sigverify::ed25519_verify(&mut batches, &recycler, &recycler_out, false, num_packets);
+    })
+}
+
+#[bench]
+#[ignore]
+fn bench_sigverify_high_packets_small_batch(bencher: &mut Bencher) {
+    let num_packets = sigverify::VERIFY_PACKET_CHUNK_SIZE * 32;
+    let mut batches = gen_batches(false, 1, num_packets);
+    let recycler = Recycler::default();
+    let recycler_out = Recycler::default();
+    bencher.iter(|| {
+        sigverify::ed25519_verify(&mut batches, &recycler, &recycler_out, false, num_packets);
+    })
+}
+
+#[bench]
+#[ignore]
+fn bench_sigverify_high_packets_large_batch(bencher: &mut Bencher) {
+    let num_packets = sigverify::VERIFY_PACKET_CHUNK_SIZE * 32;
+    let mut batches = gen_batches(false, LARGE_BATCH_PACKET_COUNT, num_packets);
+    let recycler = Recycler::default();
+    let recycler_out = Recycler::default();
+    // verify packets
+    bencher.iter(|| {
+        sigverify::ed25519_verify(&mut batches, &recycler, &recycler_out, false, num_packets);
     })
 }
 
@@ -50,15 +139,15 @@ fn bench_sigverify_uneven(bencher: &mut Bencher) {
     // generate packet vector
     let mut batches = vec![];
     while current_packets < num_packets {
-        let mut len: usize = thread_rng().gen_range(1, 128);
+        let mut len: usize = thread_rng().gen_range(1..128);
         current_packets += len;
         if current_packets > num_packets {
             len -= current_packets - num_packets;
             current_packets = num_packets;
         }
         let mut batch = PacketBatch::with_capacity(len);
-        batch.packets.resize(len, Packet::default());
-        for packet in batch.packets.iter_mut() {
+        batch.resize(len, Packet::default());
+        for packet in batch.iter_mut() {
             if thread_rng().gen_ratio(1, 2) {
                 tx = simple_tx.clone();
             } else {
@@ -66,7 +155,7 @@ fn bench_sigverify_uneven(bencher: &mut Bencher) {
             };
             Packet::populate_packet(packet, None, &tx).expect("serialize request");
             if thread_rng().gen_ratio((num_packets - NUM) as u32, num_packets as u32) {
-                packet.meta.set_discard(true);
+                packet.meta_mut().set_discard(true);
             } else {
                 num_valid += 1;
             }
@@ -79,8 +168,7 @@ fn bench_sigverify_uneven(bencher: &mut Bencher) {
     let recycler_out = Recycler::default();
     // verify packets
     bencher.iter(|| {
-        let _ans =
-            sigverify::ed25519_verify(&mut batches, &recycler, &recycler_out, false, num_packets);
+        sigverify::ed25519_verify(&mut batches, &recycler, &recycler_out, false, num_packets);
     })
 }
 

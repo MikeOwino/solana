@@ -1,10 +1,15 @@
 use {
-    crate::{message::v0::LoadedAddresses, pubkey::Pubkey},
-    std::ops::Index,
+    crate::{
+        instruction::{CompiledInstruction, Instruction},
+        message::{v0::LoadedAddresses, CompileError},
+        pubkey::Pubkey,
+    },
+    std::{collections::BTreeMap, iter::zip, ops::Index},
 };
 
 /// Collection of static and dynamically loaded keys used to load accounts
 /// during transaction processing.
+#[derive(Clone, Default, Debug, Eq)]
 pub struct AccountKeys<'a> {
     static_keys: &'a [Pubkey],
     dynamic_keys: Option<&'a LoadedAddresses>,
@@ -75,11 +80,74 @@ impl<'a> AccountKeys<'a> {
     pub fn iter(&self) -> impl Iterator<Item = &'a Pubkey> {
         self.key_segment_iter().flatten()
     }
+
+    /// Compile instructions using the order of account keys to determine
+    /// compiled instruction account indexes.
+    ///
+    /// # Panics
+    ///
+    /// Panics when compiling fails. See [`AccountKeys::try_compile_instructions`]
+    /// for a full description of failure scenarios.
+    pub fn compile_instructions(&self, instructions: &[Instruction]) -> Vec<CompiledInstruction> {
+        self.try_compile_instructions(instructions)
+            .expect("compilation failure")
+    }
+
+    /// Compile instructions using the order of account keys to determine
+    /// compiled instruction account indexes.
+    ///
+    /// # Errors
+    ///
+    /// Compilation will fail if any `instructions` use account keys which are not
+    /// present in this account key collection.
+    ///
+    /// Compilation will fail if any `instructions` use account keys which are located
+    /// at an index which cannot be cast to a `u8` without overflow.
+    pub fn try_compile_instructions(
+        &self,
+        instructions: &[Instruction],
+    ) -> Result<Vec<CompiledInstruction>, CompileError> {
+        let mut account_index_map = BTreeMap::<&Pubkey, u8>::new();
+        for (index, key) in self.iter().enumerate() {
+            let index = u8::try_from(index).map_err(|_| CompileError::AccountIndexOverflow)?;
+            account_index_map.insert(key, index);
+        }
+
+        let get_account_index = |key: &Pubkey| -> Result<u8, CompileError> {
+            account_index_map
+                .get(key)
+                .cloned()
+                .ok_or(CompileError::UnknownInstructionKey(*key))
+        };
+
+        instructions
+            .iter()
+            .map(|ix| {
+                let accounts: Vec<u8> = ix
+                    .accounts
+                    .iter()
+                    .map(|account_meta| get_account_index(&account_meta.pubkey))
+                    .collect::<Result<Vec<u8>, CompileError>>()?;
+
+                Ok(CompiledInstruction {
+                    program_id_index: get_account_index(&ix.program_id)?,
+                    data: ix.data.clone(),
+                    accounts,
+                })
+            })
+            .collect()
+    }
+}
+
+impl PartialEq for AccountKeys<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        zip(self.iter(), other.iter()).all(|(a, b)| a == b)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use {super::*, crate::instruction::AccountMeta};
 
     fn test_account_keys() -> [Pubkey; 6] {
         let key0 = Pubkey::new_unique();
@@ -109,10 +177,7 @@ mod tests {
             vec![keys[5]],
         ];
 
-        assert!(account_keys
-            .key_segment_iter()
-            .into_iter()
-            .eq(expected_segments.iter()));
+        assert!(account_keys.key_segment_iter().eq(expected_segments.iter()));
     }
 
     #[test]
@@ -195,5 +260,80 @@ mod tests {
         assert_eq!(account_keys.get(3), Some(&keys[3]));
         assert_eq!(account_keys.get(4), Some(&keys[4]));
         assert_eq!(account_keys.get(5), Some(&keys[5]));
+    }
+
+    #[test]
+    fn test_try_compile_instructions() {
+        let keys = test_account_keys();
+
+        let static_keys = vec![keys[0]];
+        let dynamic_keys = LoadedAddresses {
+            writable: vec![keys[1]],
+            readonly: vec![keys[2]],
+        };
+        let account_keys = AccountKeys::new(&static_keys, Some(&dynamic_keys));
+
+        let instruction = Instruction {
+            program_id: keys[0],
+            accounts: vec![
+                AccountMeta::new(keys[1], true),
+                AccountMeta::new(keys[2], true),
+            ],
+            data: vec![0],
+        };
+
+        assert_eq!(
+            account_keys.try_compile_instructions(&[instruction]),
+            Ok(vec![CompiledInstruction {
+                program_id_index: 0,
+                accounts: vec![1, 2],
+                data: vec![0],
+            }]),
+        );
+    }
+
+    #[test]
+    fn test_try_compile_instructions_with_unknown_key() {
+        let static_keys = test_account_keys();
+        let account_keys = AccountKeys::new(&static_keys, None);
+
+        let unknown_key = Pubkey::new_unique();
+        let test_instructions = [
+            Instruction {
+                program_id: unknown_key,
+                accounts: vec![],
+                data: vec![],
+            },
+            Instruction {
+                program_id: static_keys[0],
+                accounts: vec![
+                    AccountMeta::new(static_keys[1], false),
+                    AccountMeta::new(unknown_key, false),
+                ],
+                data: vec![],
+            },
+        ];
+
+        for ix in test_instructions {
+            assert_eq!(
+                account_keys.try_compile_instructions(&[ix]),
+                Err(CompileError::UnknownInstructionKey(unknown_key))
+            );
+        }
+    }
+
+    #[test]
+    fn test_try_compile_instructions_with_too_many_account_keys() {
+        const MAX_LENGTH_WITHOUT_OVERFLOW: usize = u8::MAX as usize + 1;
+        let static_keys = vec![Pubkey::default(); MAX_LENGTH_WITHOUT_OVERFLOW];
+        let dynamic_keys = LoadedAddresses {
+            writable: vec![Pubkey::default()],
+            readonly: vec![],
+        };
+        let account_keys = AccountKeys::new(&static_keys, Some(&dynamic_keys));
+        assert_eq!(
+            account_keys.try_compile_instructions(&[]),
+            Err(CompileError::AccountIndexOverflow)
+        );
     }
 }

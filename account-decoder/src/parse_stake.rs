@@ -6,24 +6,24 @@ use {
     bincode::deserialize,
     solana_sdk::{
         clock::{Epoch, UnixTimestamp},
-        stake::state::{Authorized, Delegation, Lockup, Meta, Stake, StakeState},
+        stake::state::{Authorized, Delegation, Lockup, Meta, Stake, StakeStateV2},
     },
 };
 
 pub fn parse_stake(data: &[u8]) -> Result<StakeAccountType, ParseAccountError> {
-    let stake_state: StakeState = deserialize(data)
+    let stake_state: StakeStateV2 = deserialize(data)
         .map_err(|_| ParseAccountError::AccountNotParsable(ParsableAccount::Stake))?;
     let parsed_account = match stake_state {
-        StakeState::Uninitialized => StakeAccountType::Uninitialized,
-        StakeState::Initialized(meta) => StakeAccountType::Initialized(UiStakeAccount {
+        StakeStateV2::Uninitialized => StakeAccountType::Uninitialized,
+        StakeStateV2::Initialized(meta) => StakeAccountType::Initialized(UiStakeAccount {
             meta: meta.into(),
             stake: None,
         }),
-        StakeState::Stake(meta, stake) => StakeAccountType::Delegated(UiStakeAccount {
+        StakeStateV2::Stake(meta, stake, _) => StakeAccountType::Delegated(UiStakeAccount {
             meta: meta.into(),
             stake: Some(stake.into()),
         }),
-        StakeState::RewardsPool => StakeAccountType::RewardsPool,
+        StakeStateV2::RewardsPool => StakeAccountType::RewardsPool,
     };
     Ok(parsed_account)
 }
@@ -44,7 +44,7 @@ pub struct UiStakeAccount {
     pub stake: Option<UiStake>,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct UiMeta {
     pub rent_exempt_reserve: StringAmount,
@@ -62,7 +62,7 @@ impl From<Meta> for UiMeta {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct UiLockup {
     pub unix_timestamp: UnixTimestamp,
@@ -80,7 +80,7 @@ impl From<Lockup> for UiLockup {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct UiAuthorized {
     pub staker: String,
@@ -119,11 +119,16 @@ pub struct UiDelegation {
     pub stake: StringAmount,
     pub activation_epoch: StringAmount,
     pub deactivation_epoch: StringAmount,
+    #[deprecated(
+        since = "1.16.7",
+        note = "Please use `solana_sdk::stake::stake::warmup_cooldown_rate()` instead"
+    )]
     pub warmup_cooldown_rate: f64,
 }
 
 impl From<Delegation> for UiDelegation {
     fn from(delegation: Delegation) -> Self {
+        #[allow(deprecated)]
         Self {
             voter: delegation.voter_pubkey.to_string(),
             stake: delegation.stake.to_string(),
@@ -136,11 +141,12 @@ impl From<Delegation> for UiDelegation {
 
 #[cfg(test)]
 mod test {
-    use {super::*, bincode::serialize};
+    use {super::*, bincode::serialize, solana_sdk::stake::stake_flags::StakeFlags};
 
     #[test]
+    #[allow(deprecated)]
     fn test_parse_stake() {
-        let stake_state = StakeState::Uninitialized;
+        let stake_state = StakeStateV2::Uninitialized;
         let stake_data = serialize(&stake_state).unwrap();
         assert_eq!(
             parse_stake(&stake_data).unwrap(),
@@ -161,7 +167,7 @@ mod test {
             lockup,
         };
 
-        let stake_state = StakeState::Initialized(meta);
+        let stake_state = StakeStateV2::Initialized(meta);
         let stake_data = serialize(&stake_state).unwrap();
         assert_eq!(
             parse_stake(&stake_data).unwrap(),
@@ -194,7 +200,7 @@ mod test {
             credits_observed: 10,
         };
 
-        let stake_state = StakeState::Stake(meta, stake);
+        let stake_state = StakeStateV2::Stake(meta, stake, StakeFlags::empty());
         let stake_data = serialize(&stake_state).unwrap();
         assert_eq!(
             parse_stake(&stake_data).unwrap(),
@@ -224,7 +230,7 @@ mod test {
             })
         );
 
-        let stake_state = StakeState::RewardsPool;
+        let stake_state = StakeStateV2::RewardsPool;
         let stake_data = serialize(&stake_state).unwrap();
         assert_eq!(
             parse_stake(&stake_data).unwrap(),

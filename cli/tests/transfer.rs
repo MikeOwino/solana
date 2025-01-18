@@ -1,4 +1,4 @@
-#![allow(clippy::integer_arithmetic)]
+#![allow(clippy::arithmetic_side_effects)]
 #![allow(clippy::redundant_closure)]
 use {
     solana_cli::{
@@ -8,12 +8,9 @@ use {
         test_utils::check_ready,
     },
     solana_cli_output::{parse_sign_only_reply_string, OutputFormat},
-    solana_client::{
-        blockhash_query::{self, BlockhashQuery},
-        nonce_utils,
-        rpc_client::RpcClient,
-    },
     solana_faucet::faucet::run_local_faucet,
+    solana_rpc_client::rpc_client::RpcClient,
+    solana_rpc_client_nonce_utils::blockhash_query::{self, BlockhashQuery},
     solana_sdk::{
         commitment_config::CommitmentConfig,
         fee::FeeStructure,
@@ -37,7 +34,7 @@ fn test_transfer() {
     let faucet_addr = run_local_faucet(mint_keypair, None);
     let test_validator = TestValidator::with_custom_fees(
         mint_pubkey,
-        1,
+        fee_one_sig,
         Some(faucet_addr),
         SocketAddrSpace::Unspecified,
     );
@@ -53,7 +50,7 @@ fn test_transfer() {
     config.signers = vec![&default_signer];
 
     let sender_pubkey = config.signers[0].pubkey();
-    let recipient_pubkey = Pubkey::new(&[1u8; 32]);
+    let recipient_pubkey = Pubkey::from([1u8; 32]);
 
     request_and_confirm_airdrop(&rpc_client, &config, &sender_pubkey, sol_to_lamports(5.0))
         .unwrap();
@@ -78,6 +75,7 @@ fn test_transfer() {
         fee_payer: 0,
         derived_address_seed: None,
         derived_address_program_id: None,
+        compute_unit_price: None,
     };
     process_command(&config).unwrap();
     check_balance!(
@@ -103,6 +101,7 @@ fn test_transfer() {
         fee_payer: 0,
         derived_address_seed: None,
         derived_address_program_id: None,
+        compute_unit_price: None,
     };
     assert!(process_command(&config).is_err());
     check_balance!(
@@ -141,6 +140,7 @@ fn test_transfer() {
         fee_payer: 0,
         derived_address_seed: None,
         derived_address_program_id: None,
+        compute_unit_price: None,
     };
     offline.output_format = OutputFormat::JsonCompact;
     let sign_only_reply = process_command(&offline).unwrap();
@@ -163,6 +163,7 @@ fn test_transfer() {
         fee_payer: 0,
         derived_address_seed: None,
         derived_address_program_id: None,
+        compute_unit_price: None,
     };
     process_command(&config).unwrap();
     check_balance!(
@@ -184,6 +185,7 @@ fn test_transfer() {
         nonce_authority: None,
         memo: None,
         amount: SpendAmount::Some(minimum_nonce_balance),
+        compute_unit_price: None,
     };
     process_command(&config).unwrap();
     check_balance!(
@@ -193,14 +195,14 @@ fn test_transfer() {
     );
 
     // Fetch nonce hash
-    let nonce_hash = nonce_utils::get_account_with_commitment(
+    let nonce_hash = solana_rpc_client_nonce_utils::get_account_with_commitment(
         &rpc_client,
         &nonce_account.pubkey(),
         CommitmentConfig::processed(),
     )
-    .and_then(|ref a| nonce_utils::data_from_account(a))
+    .and_then(|ref a| solana_rpc_client_nonce_utils::data_from_account(a))
     .unwrap()
-    .blockhash;
+    .blockhash();
 
     // Nonced transfer
     config.signers = vec![&default_signer];
@@ -222,6 +224,7 @@ fn test_transfer() {
         fee_payer: 0,
         derived_address_seed: None,
         derived_address_program_id: None,
+        compute_unit_price: None,
     };
     process_command(&config).unwrap();
     check_balance!(
@@ -230,14 +233,14 @@ fn test_transfer() {
         &sender_pubkey,
     );
     check_balance!(sol_to_lamports(2.5), &rpc_client, &recipient_pubkey);
-    let new_nonce_hash = nonce_utils::get_account_with_commitment(
+    let new_nonce_hash = solana_rpc_client_nonce_utils::get_account_with_commitment(
         &rpc_client,
         &nonce_account.pubkey(),
         CommitmentConfig::processed(),
     )
-    .and_then(|ref a| nonce_utils::data_from_account(a))
+    .and_then(|ref a| solana_rpc_client_nonce_utils::data_from_account(a))
     .unwrap()
-    .blockhash;
+    .blockhash();
     assert_ne!(nonce_hash, new_nonce_hash);
 
     // Assign nonce authority to offline
@@ -247,6 +250,7 @@ fn test_transfer() {
         nonce_authority: 0,
         memo: None,
         new_authority: offline_pubkey,
+        compute_unit_price: None,
     };
     process_command(&config).unwrap();
     check_balance!(
@@ -256,14 +260,14 @@ fn test_transfer() {
     );
 
     // Fetch nonce hash
-    let nonce_hash = nonce_utils::get_account_with_commitment(
+    let nonce_hash = solana_rpc_client_nonce_utils::get_account_with_commitment(
         &rpc_client,
         &nonce_account.pubkey(),
         CommitmentConfig::processed(),
     )
-    .and_then(|ref a| nonce_utils::data_from_account(a))
+    .and_then(|ref a| solana_rpc_client_nonce_utils::data_from_account(a))
     .unwrap()
-    .blockhash;
+    .blockhash();
 
     // Offline, nonced transfer
     offline.signers = vec![&default_offline_signer];
@@ -282,6 +286,7 @@ fn test_transfer() {
         fee_payer: 0,
         derived_address_seed: None,
         derived_address_program_id: None,
+        compute_unit_price: None,
     };
     let sign_only_reply = process_command(&offline).unwrap();
     let sign_only = parse_sign_only_reply_string(&sign_only_reply);
@@ -306,6 +311,7 @@ fn test_transfer() {
         fee_payer: 0,
         derived_address_seed: None,
         derived_address_program_id: None,
+        compute_unit_price: None,
     };
     process_command(&config).unwrap();
     check_balance!(
@@ -319,18 +325,19 @@ fn test_transfer() {
 #[test]
 fn test_transfer_multisession_signing() {
     solana_logger::setup();
-    let fee = FeeStructure::default().get_max_fee(2, 0);
+    let fee_one_sig = FeeStructure::default().get_max_fee(1, 0);
+    let fee_two_sig = FeeStructure::default().get_max_fee(2, 0);
     let mint_keypair = Keypair::new();
     let mint_pubkey = mint_keypair.pubkey();
     let faucet_addr = run_local_faucet(mint_keypair, None);
     let test_validator = TestValidator::with_custom_fees(
         mint_pubkey,
-        1,
+        fee_one_sig,
         Some(faucet_addr),
         SocketAddrSpace::Unspecified,
     );
 
-    let to_pubkey = Pubkey::new(&[1u8; 32]);
+    let to_pubkey = Pubkey::from([1u8; 32]);
     let offline_from_signer = keypair_from_seed(&[2u8; 32]).unwrap();
     let offline_fee_payer_signer = keypair_from_seed(&[3u8; 32]).unwrap();
     let from_null_signer = NullSigner::new(&offline_from_signer.pubkey());
@@ -349,7 +356,7 @@ fn test_transfer_multisession_signing() {
         &rpc_client,
         &CliConfig::recent_for_tests(),
         &offline_fee_payer_signer.pubkey(),
-        sol_to_lamports(1.0) + 2 * fee,
+        sol_to_lamports(1.0) + 2 * fee_two_sig,
     )
     .unwrap();
     check_balance!(
@@ -358,7 +365,7 @@ fn test_transfer_multisession_signing() {
         &offline_from_signer.pubkey(),
     );
     check_balance!(
-        sol_to_lamports(1.0) + 2 * fee,
+        sol_to_lamports(1.0) + 2 * fee_two_sig,
         &rpc_client,
         &offline_fee_payer_signer.pubkey(),
     );
@@ -390,6 +397,7 @@ fn test_transfer_multisession_signing() {
         fee_payer: 0,
         derived_address_seed: None,
         derived_address_program_id: None,
+        compute_unit_price: None,
     };
     fee_payer_config.output_format = OutputFormat::JsonCompact;
     let sign_only_reply = process_command(&fee_payer_config).unwrap();
@@ -421,6 +429,7 @@ fn test_transfer_multisession_signing() {
         fee_payer: 0,
         derived_address_seed: None,
         derived_address_program_id: None,
+        compute_unit_price: None,
     };
     from_config.output_format = OutputFormat::JsonCompact;
     let sign_only_reply = process_command(&from_config).unwrap();
@@ -449,6 +458,7 @@ fn test_transfer_multisession_signing() {
         fee_payer: 0,
         derived_address_seed: None,
         derived_address_program_id: None,
+        compute_unit_price: None,
     };
     process_command(&config).unwrap();
 
@@ -458,7 +468,7 @@ fn test_transfer_multisession_signing() {
         &offline_from_signer.pubkey(),
     );
     check_balance!(
-        sol_to_lamports(1.0) + fee,
+        sol_to_lamports(1.0) + fee_two_sig,
         &rpc_client,
         &offline_fee_payer_signer.pubkey(),
     );
@@ -474,7 +484,7 @@ fn test_transfer_all() {
     let faucet_addr = run_local_faucet(mint_keypair, None);
     let test_validator = TestValidator::with_custom_fees(
         mint_pubkey,
-        1,
+        fee,
         Some(faucet_addr),
         SocketAddrSpace::Unspecified,
     );
@@ -489,7 +499,7 @@ fn test_transfer_all() {
     config.signers = vec![&default_signer];
 
     let sender_pubkey = config.signers[0].pubkey();
-    let recipient_pubkey = Pubkey::new(&[1u8; 32]);
+    let recipient_pubkey = Pubkey::from([1u8; 32]);
 
     request_and_confirm_airdrop(&rpc_client, &config, &sender_pubkey, 500_000).unwrap();
     check_balance!(500_000, &rpc_client, &sender_pubkey);
@@ -513,6 +523,7 @@ fn test_transfer_all() {
         fee_payer: 0,
         derived_address_seed: None,
         derived_address_program_id: None,
+        compute_unit_price: None,
     };
     process_command(&config).unwrap();
     check_balance!(0, &rpc_client, &sender_pubkey);
@@ -542,7 +553,7 @@ fn test_transfer_unfunded_recipient() {
     config.signers = vec![&default_signer];
 
     let sender_pubkey = config.signers[0].pubkey();
-    let recipient_pubkey = Pubkey::new(&[1u8; 32]);
+    let recipient_pubkey = Pubkey::from([1u8; 32]);
 
     request_and_confirm_airdrop(&rpc_client, &config, &sender_pubkey, 50_000).unwrap();
     check_balance!(50_000, &rpc_client, &sender_pubkey);
@@ -566,6 +577,7 @@ fn test_transfer_unfunded_recipient() {
         fee_payer: 0,
         derived_address_seed: None,
         derived_address_program_id: None,
+        compute_unit_price: None,
     };
 
     // Expect failure due to unfunded recipient and the lack of the `allow_unfunded_recipient` flag
@@ -581,7 +593,7 @@ fn test_transfer_with_seed() {
     let faucet_addr = run_local_faucet(mint_keypair, None);
     let test_validator = TestValidator::with_custom_fees(
         mint_pubkey,
-        1,
+        fee,
         Some(faucet_addr),
         SocketAddrSpace::Unspecified,
     );
@@ -596,7 +608,7 @@ fn test_transfer_with_seed() {
     config.signers = vec![&default_signer];
 
     let sender_pubkey = config.signers[0].pubkey();
-    let recipient_pubkey = Pubkey::new(&[1u8; 32]);
+    let recipient_pubkey = Pubkey::from([1u8; 32]);
     let derived_address_seed = "seed".to_string();
     let derived_address_program_id = stake::program::id();
     let derived_address = Pubkey::create_with_seed(
@@ -632,6 +644,7 @@ fn test_transfer_with_seed() {
         fee_payer: 0,
         derived_address_seed: Some(derived_address_seed),
         derived_address_program_id: Some(derived_address_program_id),
+        compute_unit_price: None,
     };
     process_command(&config).unwrap();
     check_balance!(sol_to_lamports(1.0) - fee, &rpc_client, &sender_pubkey);

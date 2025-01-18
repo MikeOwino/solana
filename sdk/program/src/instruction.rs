@@ -11,7 +11,7 @@
 //! [`AccountMeta`] values. The runtime uses this information to efficiently
 //! schedule execution of transactions.
 
-#![allow(clippy::integer_arithmetic)]
+#![allow(clippy::arithmetic_side_effects)]
 
 use {
     crate::{pubkey::Pubkey, sanitize::Sanitize, short_vec, wasm_bindgen},
@@ -23,16 +23,13 @@ use {
 
 /// Reasons the runtime might have rejected an instruction.
 ///
-/// Instructions errors are included in the bank hashes and therefore are
-/// included as part of the transaction results when determining consensus.
-/// Because of this, members of this enum must not be removed, but new ones can
-/// be added.  Also, it is crucial that meta-information if any that comes along
-/// with an error be consistent across software versions.  For example, it is
+/// Members of this enum must not be removed, but new ones can be added.
+/// Also, it is crucial that meta-information if any that comes along with
+/// an error be consistent across software versions.  For example, it is
 /// dangerous to include error strings from 3rd party crates because they could
 /// change at any time and changes to them are difficult to detect.
-#[derive(
-    Serialize, Deserialize, Debug, Error, PartialEq, Eq, Clone, AbiExample, AbiEnumVisitor,
-)]
+#[cfg_attr(not(target_os = "solana"), derive(AbiExample, AbiEnumVisitor))]
+#[derive(Serialize, Deserialize, Debug, Error, PartialEq, Eq, Clone)]
 pub enum InstructionError {
     /// Deprecated! Use CustomError instead!
     /// The program instruction returned an error
@@ -154,7 +151,7 @@ pub enum InstructionError {
     ExecutableDataModified,
 
     /// Executable account's lamports modified
-    #[error("instruction changed the balance of a executable account")]
+    #[error("instruction changed the balance of an executable account")]
     ExecutableLamportChange,
 
     /// Executable accounts must be rent exempt
@@ -249,13 +246,21 @@ pub enum InstructionError {
     #[error("Provided owner is not allowed")]
     IllegalOwner,
 
-    /// Account data allocation exceeded the maximum accounts data size limit
-    #[error("Account data allocation exceeded the maximum accounts data size limit")]
-    MaxAccountsDataSizeExceeded,
+    /// Accounts data allocations exceeded the maximum allowed per transaction
+    #[error("Accounts data allocations exceeded the maximum allowed per transaction")]
+    MaxAccountsDataAllocationsExceeded,
 
-    /// Active vote account close
-    #[error("Cannot close vote account unless it stopped voting at least one full epoch ago")]
-    ActiveVoteAccountClose,
+    /// Max accounts exceeded
+    #[error("Max accounts exceeded")]
+    MaxAccountsExceeded,
+
+    /// Max instruction trace length exceeded
+    #[error("Max instruction trace length exceeded")]
+    MaxInstructionTraceLengthExceeded,
+
+    /// Builtin programs must consume compute units
+    #[error("Builtin programs must consume compute units")]
+    BuiltinProgramsMustConsumeComputeUnits,
     // Note: For any new error added here an equivalent ProgramError and its
     // conversions must also be added
 }
@@ -268,7 +273,7 @@ pub enum InstructionError {
 /// clients. Instructions are also used to describe [cross-program
 /// invocations][cpi].
 ///
-/// [cpi]: https://docs.solana.com/developing/programming-model/calling-between-programs
+/// [cpi]: https://solana.com/docs/core/cpi
 ///
 /// During execution, a program will receive a list of account data as one of
 /// its arguments, in the same order as specified during `Instruction`
@@ -320,7 +325,7 @@ pub enum InstructionError {
 /// should be specified as signers during `Instruction` construction. The
 /// program must still validate during execution that the account is a signer.
 #[wasm_bindgen]
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct Instruction {
     /// Pubkey of the program that executes this instruction.
     #[wasm_bindgen(skip)]
@@ -341,7 +346,7 @@ impl Instruction {
     /// `program_id` is the address of the program that will execute the instruction.
     /// `accounts` contains a description of all accounts that may be accessed by the program.
     ///
-    /// Borsh serialization is often prefered over bincode as it has a stable
+    /// Borsh serialization is often preferred over bincode as it has a stable
     /// [specification] and an [implementation in JavaScript][jsb], neither of
     /// which are true of bincode.
     ///
@@ -358,6 +363,7 @@ impl Instruction {
     /// # use borsh::{BorshSerialize, BorshDeserialize};
     /// #
     /// #[derive(BorshSerialize, BorshDeserialize)]
+    /// # #[borsh(crate = "borsh")]
     /// pub struct MyInstruction {
     ///     pub lamports: u64,
     /// }
@@ -385,7 +391,7 @@ impl Instruction {
         data: &T,
         accounts: Vec<AccountMeta>,
     ) -> Self {
-        let data = data.try_to_vec().unwrap();
+        let data = borsh::to_vec(data).unwrap();
         Self {
             program_id,
             accounts,
@@ -460,10 +466,10 @@ impl Instruction {
     /// #     pubkey::Pubkey,
     /// #     instruction::{AccountMeta, Instruction},
     /// # };
-    /// # use borsh::{BorshSerialize, BorshDeserialize};
-    /// # use anyhow::Result;
+    /// # use borsh::{io::Error, BorshSerialize, BorshDeserialize};
     /// #
     /// #[derive(BorshSerialize, BorshDeserialize)]
+    /// # #[borsh(crate = "borsh")]
     /// pub struct MyInstruction {
     ///     pub lamports: u64,
     /// }
@@ -473,7 +479,7 @@ impl Instruction {
     ///     from: &Pubkey,
     ///     to: &Pubkey,
     ///     lamports: u64,
-    /// ) -> Result<Instruction> {
+    /// ) -> Result<Instruction, Error> {
     ///     let instr = MyInstruction { lamports };
     ///
     ///     let mut instr_in_bytes: Vec<u8> = Vec::new();
@@ -529,7 +535,7 @@ pub fn checked_add(a: u64, b: u64) -> Result<u64, InstructionError> {
 /// a minor hazard: use [`AccountMeta::new_readonly`] to specify that an account
 /// is not writable.
 #[repr(C)]
-#[derive(Debug, Default, PartialEq, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct AccountMeta {
     /// An account's public key.
     pub pubkey: Pubkey,
@@ -552,6 +558,7 @@ impl AccountMeta {
     /// # use borsh::{BorshSerialize, BorshDeserialize};
     /// #
     /// # #[derive(BorshSerialize, BorshDeserialize)]
+    /// # #[borsh(crate = "borsh")]
     /// # pub struct MyInstruction;
     /// #
     /// # let instruction = MyInstruction;
@@ -587,6 +594,7 @@ impl AccountMeta {
     /// # use borsh::{BorshSerialize, BorshDeserialize};
     /// #
     /// # #[derive(BorshSerialize, BorshDeserialize)]
+    /// # #[borsh(crate = "borsh")]
     /// # pub struct MyInstruction;
     /// #
     /// # let instruction = MyInstruction;
@@ -661,12 +669,12 @@ impl CompiledInstruction {
 /// Use to query and convey information about the sibling instruction components
 /// when calling the `sol_get_processed_sibling_instruction` syscall.
 #[repr(C)]
-#[derive(Default, Debug, Clone, Copy)]
+#[derive(Default, Debug, Clone, Copy, Eq, PartialEq)]
 pub struct ProcessedSiblingInstruction {
     /// Length of the instruction data
-    pub data_len: usize,
+    pub data_len: u64,
     /// Number of AccountMeta structures
-    pub accounts_len: usize,
+    pub accounts_len: u64,
 }
 
 /// Returns a sibling instruction from the processed sibling instruction list.
@@ -682,23 +690,13 @@ pub struct ProcessedSiblingInstruction {
 /// Then B's processed sibling instruction list is: `[A]`
 /// Then F's processed sibling instruction list is: `[E, C]`
 pub fn get_processed_sibling_instruction(index: usize) -> Option<Instruction> {
-    #[cfg(target_arch = "bpf")]
+    #[cfg(target_os = "solana")]
     {
-        extern "C" {
-            fn sol_get_processed_sibling_instruction(
-                index: u64,
-                meta: *mut ProcessedSiblingInstruction,
-                program_id: *mut Pubkey,
-                data: *mut u8,
-                accounts: *mut AccountMeta,
-            ) -> u64;
-        }
-
         let mut meta = ProcessedSiblingInstruction::default();
         let mut program_id = Pubkey::default();
 
         if 1 == unsafe {
-            sol_get_processed_sibling_instruction(
+            crate::syscalls::sol_get_processed_sibling_instruction(
                 index as u64,
                 &mut meta,
                 &mut program_id,
@@ -708,11 +706,11 @@ pub fn get_processed_sibling_instruction(index: usize) -> Option<Instruction> {
         } {
             let mut data = Vec::new();
             let mut accounts = Vec::new();
-            data.resize_with(meta.data_len, u8::default);
-            accounts.resize_with(meta.accounts_len, AccountMeta::default);
+            data.resize_with(meta.data_len as usize, u8::default);
+            accounts.resize_with(meta.accounts_len as usize, AccountMeta::default);
 
             let _ = unsafe {
-                sol_get_processed_sibling_instruction(
+                crate::syscalls::sol_get_processed_sibling_instruction(
                     index as u64,
                     &mut meta,
                     &mut program_id,
@@ -727,7 +725,7 @@ pub fn get_processed_sibling_instruction(index: usize) -> Option<Instruction> {
         }
     }
 
-    #[cfg(not(target_arch = "bpf"))]
+    #[cfg(not(target_os = "solana"))]
     crate::program_stubs::sol_get_processed_sibling_instruction(index)
 }
 
@@ -738,56 +736,13 @@ pub const TRANSACTION_LEVEL_STACK_HEIGHT: usize = 1;
 /// TRANSACTION_LEVEL_STACK_HEIGHT, fist invoked inner instruction is height
 /// TRANSACTION_LEVEL_STACK_HEIGHT + 1, etc...
 pub fn get_stack_height() -> usize {
-    #[cfg(target_arch = "bpf")]
-    {
-        extern "C" {
-            fn sol_get_stack_height() -> u64;
-        }
-
-        unsafe { sol_get_stack_height() as usize }
+    #[cfg(target_os = "solana")]
+    unsafe {
+        crate::syscalls::sol_get_stack_height() as usize
     }
 
-    #[cfg(not(target_arch = "bpf"))]
+    #[cfg(not(target_os = "solana"))]
     {
         crate::program_stubs::sol_get_stack_height() as usize
     }
-}
-
-#[test]
-fn test_account_meta_layout() {
-    #[derive(Debug, Default, PartialEq, Clone, Serialize, Deserialize)]
-    struct AccountMetaRust {
-        pub pubkey: Pubkey,
-        pub is_signer: bool,
-        pub is_writable: bool,
-    }
-
-    let account_meta_rust = AccountMetaRust::default();
-    let base_rust_addr = &account_meta_rust as *const _ as u64;
-    let pubkey_rust_addr = &account_meta_rust.pubkey as *const _ as u64;
-    let is_signer_rust_addr = &account_meta_rust.is_signer as *const _ as u64;
-    let is_writable_rust_addr = &account_meta_rust.is_writable as *const _ as u64;
-
-    let account_meta_c = AccountMeta::default();
-    let base_c_addr = &account_meta_c as *const _ as u64;
-    let pubkey_c_addr = &account_meta_c.pubkey as *const _ as u64;
-    let is_signer_c_addr = &account_meta_c.is_signer as *const _ as u64;
-    let is_writable_c_addr = &account_meta_c.is_writable as *const _ as u64;
-
-    assert_eq!(
-        std::mem::size_of::<AccountMetaRust>(),
-        std::mem::size_of::<AccountMeta>()
-    );
-    assert_eq!(
-        pubkey_rust_addr - base_rust_addr,
-        pubkey_c_addr - base_c_addr
-    );
-    assert_eq!(
-        is_signer_rust_addr - base_rust_addr,
-        is_signer_c_addr - base_c_addr
-    );
-    assert_eq!(
-        is_writable_rust_addr - base_rust_addr,
-        is_writable_c_addr - base_c_addr
-    );
 }

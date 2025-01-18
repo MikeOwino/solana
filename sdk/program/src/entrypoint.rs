@@ -1,5 +1,8 @@
-//! Solana Rust-based BPF program entry point supported by the latest
-//! BPFLoader.  For more information see './bpf_loader.rs'
+//! The Rust-based BPF program entrypoint supported by the latest BPF loader.
+//!
+//! For more information see the [`bpf_loader`] module.
+//!
+//! [`bpf_loader`]: crate::bpf_loader
 
 extern crate alloc;
 use {
@@ -33,7 +36,10 @@ pub const HEAP_START_ADDRESS: u64 = 0x300000000;
 /// Length of the heap memory region used for program heap.
 pub const HEAP_LENGTH: usize = 32 * 1024;
 
-/// Declare the program entry point and set up global handlers.
+/// Value used to indicate that a serialized account is not a duplicate
+pub const NON_DUP_MARKER: u8 = u8::MAX;
+
+/// Declare the program entrypoint and set up global handlers.
 ///
 /// This macro emits the common boilerplate necessary to begin program
 /// execution, calling a provided function to process the program instruction
@@ -41,6 +47,9 @@ pub const HEAP_LENGTH: usize = 32 * 1024;
 ///
 /// It also sets up a [global allocator] and [panic handler], using the
 /// [`custom_heap_default`] and [`custom_panic_default`] macros.
+///
+/// [`custom_heap_default`]: crate::custom_heap_default
+/// [`custom_panic_default`]: crate::custom_panic_default
 ///
 /// [global allocator]: https://doc.rust-lang.org/stable/std/alloc/trait.GlobalAlloc.html
 /// [panic handler]: https://doc.rust-lang.org/nomicon/panic-handler.html
@@ -82,7 +91,7 @@ pub const HEAP_LENGTH: usize = 32 * 1024;
 ///
 /// # Examples
 ///
-/// Defining an entry point and making it conditional on the `no-entrypoint`
+/// Defining an entrypoint and making it conditional on the `no-entrypoint`
 /// feature. Although the `entrypoint` module is written inline in this example,
 /// it is common to put it into its own file.
 ///
@@ -137,7 +146,7 @@ macro_rules! entrypoint {
 /// for [BPF] targets.
 ///
 /// [Cargo features]: https://doc.rust-lang.org/cargo/reference/features.html
-/// [BPF]: https://docs.solana.com/developing/on-chain-programs/overview#berkeley-packet-filter-bpf
+/// [BPF]: https://solana.com/docs/programs/faq#berkeley-packet-filter-bpf
 ///
 /// # Cargo features
 ///
@@ -152,7 +161,7 @@ macro_rules! entrypoint {
 #[macro_export]
 macro_rules! custom_heap_default {
     () => {
-        #[cfg(all(not(feature = "custom-heap"), target_arch = "bpf"))]
+        #[cfg(all(not(feature = "custom-heap"), target_os = "solana"))]
         #[global_allocator]
         static A: $crate::entrypoint::BumpAllocator = $crate::entrypoint::BumpAllocator {
             start: $crate::entrypoint::HEAP_START_ADDRESS as usize,
@@ -172,7 +181,7 @@ macro_rules! custom_heap_default {
 /// for [BPF] targets.
 ///
 /// [Cargo features]: https://doc.rust-lang.org/cargo/reference/features.html
-/// [BPF]: https://docs.solana.com/developing/on-chain-programs/overview#berkeley-packet-filter-bpf
+/// [BPF]: https://solana.com/docs/programs/faq#berkeley-packet-filter-bpf
 ///
 /// # Cargo features
 ///
@@ -197,7 +206,7 @@ macro_rules! custom_heap_default {
 /// with the `#[no_mangle]` attribute, as below:
 ///
 /// ```ignore
-/// #[cfg(all(feature = "custom-panic", target_arch = "bpf"))]
+/// #[cfg(all(feature = "custom-panic", target_os = "solana"))]
 /// #[no_mangle]
 /// fn custom_panic(info: &core::panic::PanicInfo<'_>) {
 ///     $crate::msg!("{}", info);
@@ -208,7 +217,7 @@ macro_rules! custom_heap_default {
 #[macro_export]
 macro_rules! custom_panic_default {
     () => {
-        #[cfg(all(not(feature = "custom-panic"), target_arch = "bpf"))]
+        #[cfg(all(not(feature = "custom-panic"), target_os = "solana"))]
         #[no_mangle]
         fn custom_panic(info: &core::panic::PanicInfo<'_>) {
             // Full panic reporting
@@ -225,7 +234,7 @@ pub struct BumpAllocator {
 /// Integer arithmetic in this global allocator implementation is safe when
 /// operating on the prescribed `HEAP_START_ADDRESS` and `HEAP_LENGTH`. Any
 /// other use may overflow and is thus unsupported and at one's own risk.
-#[allow(clippy::integer_arithmetic)]
+#[allow(clippy::arithmetic_side_effects)]
 unsafe impl std::alloc::GlobalAlloc for BumpAllocator {
     #[inline]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
@@ -263,7 +272,7 @@ pub const BPF_ALIGN_OF_U128: usize = 8;
 /// done at one's own risk.
 ///
 /// # Safety
-#[allow(clippy::integer_arithmetic)]
+#[allow(clippy::arithmetic_side_effects)]
 #[allow(clippy::type_complexity)]
 pub unsafe fn deserialize<'a>(input: *mut u8) -> (&'a Pubkey, Vec<AccountInfo<'a>>, &'a [u8]) {
     let mut offset: usize = 0;
@@ -280,7 +289,7 @@ pub unsafe fn deserialize<'a>(input: *mut u8) -> (&'a Pubkey, Vec<AccountInfo<'a
     for _ in 0..num_accounts {
         let dup_info = *(input.add(offset) as *const u8);
         offset += size_of::<u8>();
-        if dup_info == std::u8::MAX {
+        if dup_info == NON_DUP_MARKER {
             #[allow(clippy::cast_ptr_alignment)]
             let is_signer = *(input.add(offset) as *const u8) != 0;
             offset += size_of::<u8>();
@@ -293,7 +302,11 @@ pub unsafe fn deserialize<'a>(input: *mut u8) -> (&'a Pubkey, Vec<AccountInfo<'a
             let executable = *(input.add(offset) as *const u8) != 0;
             offset += size_of::<u8>();
 
-            offset += size_of::<u32>(); // padding to u64
+            // The original data length is stored here because these 4 bytes were
+            // originally only used for padding and served as a good location to
+            // track the original size of the account data in a compatible way.
+            let original_data_len_offset = offset;
+            offset += size_of::<u32>();
 
             let key: &Pubkey = &*(input.add(offset) as *const Pubkey);
             offset += size_of::<Pubkey>();
@@ -308,6 +321,10 @@ pub unsafe fn deserialize<'a>(input: *mut u8) -> (&'a Pubkey, Vec<AccountInfo<'a
             #[allow(clippy::cast_ptr_alignment)]
             let data_len = *(input.add(offset) as *const u64) as usize;
             offset += size_of::<u64>();
+
+            // Store the original data length for detecting invalid reallocations and
+            // requires that MAX_PERMITTED_DATA_LENGTH fits in a u32
+            *(input.add(original_data_len_offset) as *mut u32) = data_len as u32;
 
             let data = Rc::new(RefCell::new({
                 from_raw_parts_mut(input.add(offset), data_len)
@@ -361,7 +378,7 @@ mod test {
     fn test_bump_allocator() {
         // alloc the entire
         {
-            let heap = vec![0u8; 128];
+            let heap = [0u8; 128];
             let allocator = BumpAllocator {
                 start: heap.as_ptr() as *const _ as usize,
                 len: heap.len(),
@@ -381,7 +398,7 @@ mod test {
         }
         // check alignment
         {
-            let heap = vec![0u8; 128];
+            let heap = [0u8; 128];
             let allocator = BumpAllocator {
                 start: heap.as_ptr() as *const _ as usize,
                 len: heap.len(),
@@ -406,7 +423,7 @@ mod test {
         }
         // alloc entire block (minus the pos ptr)
         {
-            let heap = vec![0u8; 128];
+            let heap = [0u8; 128];
             let allocator = BumpAllocator {
                 start: heap.as_ptr() as *const _ as usize,
                 len: heap.len(),

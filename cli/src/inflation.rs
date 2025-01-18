@@ -9,13 +9,13 @@ use {
     solana_cli_output::{
         CliEpochRewardshMetadata, CliInflation, CliKeyedEpochReward, CliKeyedEpochRewards,
     },
-    solana_client::rpc_client::RpcClient,
     solana_remote_wallet::remote_wallet::RemoteWalletManager,
+    solana_rpc_client::rpc_client::RpcClient,
     solana_sdk::{clock::Epoch, pubkey::Pubkey},
-    std::sync::Arc,
+    std::rc::Rc,
 };
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum InflationCliCommand {
     Show,
     Rewards(Vec<Pubkey>, Option<Epoch>),
@@ -39,7 +39,7 @@ impl InflationSubCommands for App<'_, '_> {
                                 .index(1)
                                 .multiple(true)
                                 .required(true),
-                            "Address of account to query for rewards. "
+                            "Account to query for rewards."
                         ))
                         .arg(
                             Arg::with_name("rewards_epoch")
@@ -56,7 +56,7 @@ impl InflationSubCommands for App<'_, '_> {
 pub fn parse_inflation_subcommand(
     matches: &ArgMatches<'_>,
     _default_signer: &DefaultSigner,
-    _wallet_manager: &mut Option<Arc<RemoteWalletManager>>,
+    _wallet_manager: &mut Option<Rc<RemoteWalletManager>>,
 ) -> Result<CliCommandInfo, CliError> {
     let command = match matches.subcommand() {
         ("rewards", Some(matches)) => {
@@ -107,9 +107,9 @@ fn process_rewards(
         .get_inflation_reward(addresses, rewards_epoch)
         .map_err(|err| {
             if let Some(epoch) = rewards_epoch {
-                format!("Rewards not available for epoch {}", epoch)
+                format!("Rewards not available for epoch {epoch}")
             } else {
-                format!("Rewards not available {}", err)
+                format!("Rewards not available {err}")
             }
         })?;
     let epoch_schedule = rpc_client.get_epoch_schedule()?;

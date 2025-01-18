@@ -1,15 +1,29 @@
-//! The sigma proofs for transfer fees.
+//! The fee sigma proof.
 //!
-//! TODO: Add detail on how the fee is calculated.
+//! A fee sigma proof certifies that an ElGamal ciphertext encrypts a properly computed transfer fee.
+//!
+//! A detailed description of how transfer fees and proofs are calculated is provided in the [`ZK
+//! Token proof program`] documentation.
+//!
+//! The protocol guarantees computational soundness (by the hardness of discrete log) and perfect
+//! zero-knowledge in the random oracle model.
+//!
+//! [`ZK Token proof program`]: https://docs.solanalabs.com/runtime/zk-token-proof
 
-#[cfg(not(target_arch = "bpf"))]
+#[cfg(not(target_os = "solana"))]
 use {
-    crate::encryption::pedersen::{PedersenCommitment, PedersenOpening, G, H},
+    crate::{
+        encryption::pedersen::{PedersenCommitment, PedersenOpening, G, H},
+        sigma_proofs::{canonical_scalar_from_optional_slice, ristretto_point_from_optional_slice},
+        UNIT_LEN,
+    },
     rand::rngs::OsRng,
 };
 use {
-    crate::{sigma_proofs::errors::FeeSigmaProofError, transcript::TranscriptProtocol},
-    arrayref::{array_ref, array_refs},
+    crate::{
+        sigma_proofs::errors::{FeeSigmaProofVerificationError, SigmaProofVerificationError},
+        transcript::TranscriptProtocol,
+    },
     curve25519_dalek::{
         ristretto::{CompressedRistretto, RistrettoPoint},
         scalar::Scalar,
@@ -19,12 +33,15 @@ use {
     subtle::{Choice, ConditionallySelectable, ConstantTimeGreater},
 };
 
+/// Byte length of a fee sigma proof.
+const FEE_SIGMA_PROOF_LEN: usize = UNIT_LEN * 8;
+
 /// Fee sigma proof.
 ///
 /// The proof consists of two main components: `fee_max_proof` and `fee_equality_proof`. If the fee
-/// surpasses the maximum fee bound, then the `fee_max_proof` should properly be generated and
-/// `fee_equality_proof` should be simulated. If the fee is below the maximum fee bound, then the
-/// `fee_equality_proof` should be properly generated and `fee_max_proof` should be simulated.
+/// is greater than the maximum fee bound, then the `fee_max_proof` is properly generated and
+/// `fee_equality_proof` is simulated. If the fee is smaller than the maximum fee bound, the
+/// `fee_equality_proof` is properly generated and `fee_max_proof` is simulated.
 #[derive(Clone)]
 pub struct FeeSigmaProof {
     /// Proof that the committed fee amount equals the maximum fee bound
@@ -35,10 +52,41 @@ pub struct FeeSigmaProof {
 }
 
 #[allow(non_snake_case, dead_code)]
-#[cfg(not(target_arch = "bpf"))]
+#[cfg(not(target_os = "solana"))]
 impl FeeSigmaProof {
     /// Creates a fee sigma proof assuming that the committed fee is greater than the maximum fee
     /// bound.
+    ///
+    /// A transfer fee amount `fee_amount` for a `transfer_amount` is determined by two parameters:
+    /// - the `fee_rate_basis_point`, which defines the fee rate in units of 0.01%,
+    /// - the `max_fee`, which defines the cap amount for a transfer fee.
+    ///
+    /// This means that there are two cases to consider. If `fee_amount >= max_fee`, then the
+    /// `fee_amount` must always equal `max_fee`.
+    ///
+    /// If `fee_amount < max_fee`, then assuming that there is no division rounding, the
+    /// `fee_amount` must satisfy the relation `transfer_amount * (fee_rate_basis_point /
+    /// 10_000) = fee_amount` or equivalently, `(transfer_amount * fee_rate_basis_point) - (10_000
+    /// * fee_amount) = 0`. More generally, let `delta_fee = (transfer_amount *
+    /// fee_rate_basis_point) - (10_000 * fee_amount)`. Then assuming that a division rounding
+    /// could occur, the `delta_fee` must satisfy the bound `0 <= delta_fee < 10_000`.
+    ///
+    /// If `fee_amount >= max_fee`, then `fee_amount = max_fee` and therefore, the prover can
+    /// generate a proof certifying that a fee commitment exactly encodes `max_fee`. If
+    /// `fee_amount < max_fee`, then the prover can create a commitment to `delta_fee` and
+    /// create a range proof certifying that the committed value satisfies the bound `0 <=
+    /// delta_fee < 10_000`.
+    ///
+    /// Since the type of proof that a prover generates reveals information about the transfer
+    /// amount and transfer fee, the prover must generate and include both types of proof. If
+    /// `fee_amount >= max_fee`, then the prover generates a valid `fee_max_proof`, but commits
+    /// to 0 as the "claimed" delta value and simulates ("fakes") a proof (`fee_equality_proof`)
+    /// that this is valid. If `fee_amount > max_fee`, then the prover simulates a
+    /// `fee_max_proof`, and creates a valid `fee_equality_proof` certifying that the claimed delta
+    /// value is equal to the "real" delta value.
+    ///
+    /// Note: In the implementation, the proof is generated twice via `create_proof_fee_above_max`
+    /// and `create_proof_fee_below_max` to enforce that the function executes in constant time.
     ///
     /// * `(fee_amount, fee_commitment, fee_opening)` - The amount, Pedersen commitment, and
     /// opening of the transfer fee
@@ -76,24 +124,29 @@ impl FeeSigmaProof {
 
         let below_max = u64::ct_gt(&max_fee, &fee_amount);
 
-        // conditionally assign transcript; transcript is not conditionally selectable
-        if bool::from(below_max) {
-            *transcript = transcript_fee_below_max;
-        } else {
-            *transcript = transcript_fee_above_max;
-        }
+        // choose one of `proof_fee_above_max` or `proof_fee_below_max` according to whether the
+        // fee amount is greater than `max_fee` or not
+        let fee_max_proof = FeeMaxProof::conditional_select(
+            &proof_fee_above_max.fee_max_proof,
+            &proof_fee_below_max.fee_max_proof,
+            below_max,
+        );
+
+        let fee_equality_proof = FeeEqualityProof::conditional_select(
+            &proof_fee_above_max.fee_equality_proof,
+            &proof_fee_below_max.fee_equality_proof,
+            below_max,
+        );
+
+        transcript.append_point(b"Y_max_proof", &fee_max_proof.Y_max_proof);
+        transcript.append_point(b"Y_delta", &fee_equality_proof.Y_delta);
+        transcript.append_point(b"Y_claimed", &fee_equality_proof.Y_claimed);
+        transcript.challenge_scalar(b"c");
+        transcript.challenge_scalar(b"w");
 
         Self {
-            fee_max_proof: FeeMaxProof::conditional_select(
-                &proof_fee_above_max.fee_max_proof,
-                &proof_fee_below_max.fee_max_proof,
-                below_max,
-            ),
-            fee_equality_proof: FeeEqualityProof::conditional_select(
-                &proof_fee_above_max.fee_equality_proof,
-                &proof_fee_below_max.fee_equality_proof,
-                below_max,
-            ),
+            fee_max_proof,
+            fee_equality_proof,
         }
     }
 
@@ -246,7 +299,7 @@ impl FeeSigmaProof {
         }
     }
 
-    /// Fee sigma proof verifier.
+    /// Verifies a fee sigma proof
     ///
     /// * `fee_commitment` - The Pedersen commitment of the transfer fee
     /// * `delta_commitment` - The Pedersen commitment of the "real" delta value
@@ -260,7 +313,7 @@ impl FeeSigmaProof {
         claimed_commitment: &PedersenCommitment,
         max_fee: u64,
         transcript: &mut Transcript,
-    ) -> Result<(), FeeSigmaProofError> {
+    ) -> Result<(), FeeSigmaProofVerificationError> {
         // extract the relevant scalar and Ristretto points from the input
         let m = Scalar::from(max_fee);
 
@@ -276,19 +329,19 @@ impl FeeSigmaProof {
             .fee_max_proof
             .Y_max_proof
             .decompress()
-            .ok_or(FeeSigmaProofError::Format)?;
+            .ok_or(SigmaProofVerificationError::Deserialization)?;
         let z_max = self.fee_max_proof.z_max_proof;
 
         let Y_delta_real = self
             .fee_equality_proof
             .Y_delta
             .decompress()
-            .ok_or(FeeSigmaProofError::Format)?;
+            .ok_or(SigmaProofVerificationError::Deserialization)?;
         let Y_claimed = self
             .fee_equality_proof
             .Y_claimed
             .decompress()
-            .ok_or(FeeSigmaProofError::Format)?;
+            .ok_or(SigmaProofVerificationError::Deserialization)?;
         let z_x = self.fee_equality_proof.z_x;
         let z_delta_real = self.fee_equality_proof.z_delta;
         let z_claimed = self.fee_equality_proof.z_claimed;
@@ -334,40 +387,59 @@ impl FeeSigmaProof {
         if check.is_identity() {
             Ok(())
         } else {
-            Err(FeeSigmaProofError::AlgebraicRelation)
+            Err(SigmaProofVerificationError::AlgebraicRelation.into())
         }
     }
 
-    pub fn to_bytes(&self) -> [u8; 256] {
-        let mut buf = [0_u8; 256];
-        buf[..32].copy_from_slice(self.fee_max_proof.Y_max_proof.as_bytes());
-        buf[32..64].copy_from_slice(self.fee_max_proof.z_max_proof.as_bytes());
-        buf[64..96].copy_from_slice(self.fee_max_proof.c_max_proof.as_bytes());
-        buf[96..128].copy_from_slice(self.fee_equality_proof.Y_delta.as_bytes());
-        buf[128..160].copy_from_slice(self.fee_equality_proof.Y_claimed.as_bytes());
-        buf[160..192].copy_from_slice(self.fee_equality_proof.z_x.as_bytes());
-        buf[192..224].copy_from_slice(self.fee_equality_proof.z_delta.as_bytes());
-        buf[224..256].copy_from_slice(self.fee_equality_proof.z_claimed.as_bytes());
+    pub fn to_bytes(&self) -> [u8; FEE_SIGMA_PROOF_LEN] {
+        let mut buf = [0_u8; FEE_SIGMA_PROOF_LEN];
+        let mut chunks = buf.chunks_mut(UNIT_LEN);
+        chunks
+            .next()
+            .unwrap()
+            .copy_from_slice(self.fee_max_proof.Y_max_proof.as_bytes());
+        chunks
+            .next()
+            .unwrap()
+            .copy_from_slice(self.fee_max_proof.z_max_proof.as_bytes());
+        chunks
+            .next()
+            .unwrap()
+            .copy_from_slice(self.fee_max_proof.c_max_proof.as_bytes());
+        chunks
+            .next()
+            .unwrap()
+            .copy_from_slice(self.fee_equality_proof.Y_delta.as_bytes());
+        chunks
+            .next()
+            .unwrap()
+            .copy_from_slice(self.fee_equality_proof.Y_claimed.as_bytes());
+        chunks
+            .next()
+            .unwrap()
+            .copy_from_slice(self.fee_equality_proof.z_x.as_bytes());
+        chunks
+            .next()
+            .unwrap()
+            .copy_from_slice(self.fee_equality_proof.z_delta.as_bytes());
+        chunks
+            .next()
+            .unwrap()
+            .copy_from_slice(self.fee_equality_proof.z_claimed.as_bytes());
         buf
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, FeeSigmaProofError> {
-        let bytes = array_ref![bytes, 0, 256];
-        let (Y_max_proof, z_max_proof, c_max_proof, Y_delta, Y_claimed, z_x, z_delta, z_claimed) =
-            array_refs![bytes, 32, 32, 32, 32, 32, 32, 32, 32];
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, FeeSigmaProofVerificationError> {
+        let mut chunks = bytes.chunks(UNIT_LEN);
+        let Y_max_proof = ristretto_point_from_optional_slice(chunks.next())?;
+        let z_max_proof = canonical_scalar_from_optional_slice(chunks.next())?;
+        let c_max_proof = canonical_scalar_from_optional_slice(chunks.next())?;
 
-        let Y_max_proof = CompressedRistretto::from_slice(Y_max_proof);
-        let z_max_proof =
-            Scalar::from_canonical_bytes(*z_max_proof).ok_or(FeeSigmaProofError::Format)?;
-        let c_max_proof =
-            Scalar::from_canonical_bytes(*c_max_proof).ok_or(FeeSigmaProofError::Format)?;
-
-        let Y_delta = CompressedRistretto::from_slice(Y_delta);
-        let Y_claimed = CompressedRistretto::from_slice(Y_claimed);
-        let z_x = Scalar::from_canonical_bytes(*z_x).ok_or(FeeSigmaProofError::Format)?;
-        let z_delta = Scalar::from_canonical_bytes(*z_delta).ok_or(FeeSigmaProofError::Format)?;
-        let z_claimed =
-            Scalar::from_canonical_bytes(*z_claimed).ok_or(FeeSigmaProofError::Format)?;
+        let Y_delta = ristretto_point_from_optional_slice(chunks.next())?;
+        let Y_claimed = ristretto_point_from_optional_slice(chunks.next())?;
+        let z_x = canonical_scalar_from_optional_slice(chunks.next())?;
+        let z_delta = canonical_scalar_from_optional_slice(chunks.next())?;
+        let z_claimed = canonical_scalar_from_optional_slice(chunks.next())?;
 
         Ok(Self {
             fee_max_proof: FeeMaxProof {
@@ -433,6 +505,7 @@ impl ConditionallySelectable for FeeEqualityProof {
     }
 }
 
+/// Selects one of two Ristretto points in constant time.
 #[allow(clippy::needless_range_loop)]
 fn conditional_select_ristretto(
     a: &CompressedRistretto,
@@ -494,12 +567,12 @@ mod test {
 
     #[test]
     fn test_fee_below_max_proof() {
-        let transfer_amount: u64 = 55;
-        let max_fee: u64 = 77;
+        let transfer_amount: u64 = 1;
+        let max_fee: u64 = 3;
 
-        let fee_rate: u16 = 555; // 5.55%
-        let fee_amount: u64 = 4;
-        let delta: u64 = 9475; // 4*10000 - 55*555
+        let fee_rate: u16 = 400; // 5.55%
+        let fee_amount: u64 = 1;
+        let delta: u64 = 9600; // 4*10000 - 55*555
 
         let (transfer_commitment, transfer_opening) = Pedersen::new(transfer_amount);
         let (fee_commitment, fee_opening) = Pedersen::new(fee_amount);

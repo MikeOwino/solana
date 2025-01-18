@@ -1,13 +1,16 @@
 //! The `sendmmsg` module provides sendmmsg() API implementation
 
 #[cfg(target_os = "linux")]
+#[allow(deprecated)]
+use nix::sys::socket::InetAddr;
+#[cfg(target_os = "linux")]
 use {
     itertools::izip,
     libc::{iovec, mmsghdr, sockaddr_in, sockaddr_in6, sockaddr_storage},
-    nix::sys::socket::InetAddr,
     std::os::unix::io::AsRawFd,
 };
 use {
+    solana_sdk::transport::TransportError,
     std::{
         borrow::Borrow,
         io,
@@ -22,6 +25,12 @@ pub enum SendPktsError {
     /// IO Error during send: first error, num failed packets
     #[error("IO Error, some packets could not be sent")]
     IoError(io::Error, usize),
+}
+
+impl From<SendPktsError> for TransportError {
+    fn from(err: SendPktsError) -> Self {
+        Self::Custom(format!("{err:?}"))
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -67,6 +76,7 @@ fn mmsghdr_for_packet(
     hdr.msg_hdr.msg_iovlen = 1;
     hdr.msg_hdr.msg_name = addr as *mut _ as *mut _;
 
+    #[allow(deprecated)]
     match InetAddr::from_std(dest) {
         InetAddr::V4(dest) => {
             unsafe {
@@ -124,7 +134,8 @@ where
 {
     let size = packets.len();
     #[allow(clippy::uninit_assumed_init)]
-    let mut iovs = vec![unsafe { std::mem::MaybeUninit::uninit().assume_init() }; size];
+    let iovec = std::mem::MaybeUninit::<iovec>::uninit();
+    let mut iovs = vec![unsafe { iovec.assume_init() }; size];
     let mut addrs = vec![unsafe { std::mem::zeroed() }; size];
     let mut hdrs = vec![unsafe { std::mem::zeroed() }; size];
     for ((pkt, dest), hdr, iov, addr) in izip!(packets, &mut hdrs, &mut iovs, &mut addrs) {
@@ -155,6 +166,7 @@ mod tests {
             recvmmsg::recv_mmsg,
             sendmmsg::{batch_send, multi_target_send, SendPktsError},
         },
+        assert_matches::assert_matches,
         solana_sdk::packet::PACKET_DATA_SIZE,
         std::{
             io::ErrorKind,
@@ -234,7 +246,7 @@ mod tests {
 
         let sent = multi_target_send(
             &sender,
-            &packet.data[..packet.meta.size],
+            packet.data(..).unwrap(),
             &[&addr, &addr2, &addr3, &addr4],
         )
         .ok();
@@ -270,14 +282,10 @@ mod tests {
         let dest_refs: Vec<_> = vec![&ip4, &ip6, &ip4];
 
         let sender = UdpSocket::bind("0.0.0.0:0").expect("bind");
-        if let Err(SendPktsError::IoError(_, num_failed)) = batch_send(&sender, &packet_refs[..]) {
-            assert_eq!(num_failed, 1);
-        }
-        if let Err(SendPktsError::IoError(_, num_failed)) =
-            multi_target_send(&sender, &packets[0], &dest_refs)
-        {
-            assert_eq!(num_failed, 1);
-        }
+        let res = batch_send(&sender, &packet_refs[..]);
+        assert_matches!(res, Err(SendPktsError::IoError(_, /*num_failed*/ 1)));
+        let res = multi_target_send(&sender, &packets[0], &dest_refs);
+        assert_matches!(res, Err(SendPktsError::IoError(_, /*num_failed*/ 1)));
     }
 
     #[test]
@@ -295,11 +303,12 @@ mod tests {
             (&packets[3][..], &ipv4broadcast),
             (&packets[4][..], &ipv4local),
         ];
-        if let Err(SendPktsError::IoError(ioerror, num_failed)) =
-            batch_send(&sender, &packet_refs[..])
-        {
-            assert!(matches!(ioerror.kind(), ErrorKind::PermissionDenied));
-            assert_eq!(num_failed, 2);
+        match batch_send(&sender, &packet_refs[..]) {
+            Ok(()) => panic!(),
+            Err(SendPktsError::IoError(ioerror, num_failed)) => {
+                assert_matches!(ioerror.kind(), ErrorKind::PermissionDenied);
+                assert_eq!(num_failed, 2);
+            }
         }
 
         // test leading and trailing failures for batch_send
@@ -310,11 +319,12 @@ mod tests {
             (&packets[3][..], &ipv4local),
             (&packets[4][..], &ipv4broadcast),
         ];
-        if let Err(SendPktsError::IoError(ioerror, num_failed)) =
-            batch_send(&sender, &packet_refs[..])
-        {
-            assert!(matches!(ioerror.kind(), ErrorKind::PermissionDenied));
-            assert_eq!(num_failed, 3);
+        match batch_send(&sender, &packet_refs[..]) {
+            Ok(()) => panic!(),
+            Err(SendPktsError::IoError(ioerror, num_failed)) => {
+                assert_matches!(ioerror.kind(), ErrorKind::PermissionDenied);
+                assert_eq!(num_failed, 3);
+            }
         }
 
         // test consecutive intermediate failures for batch_send
@@ -325,11 +335,12 @@ mod tests {
             (&packets[3][..], &ipv4broadcast),
             (&packets[4][..], &ipv4local),
         ];
-        if let Err(SendPktsError::IoError(ioerror, num_failed)) =
-            batch_send(&sender, &packet_refs[..])
-        {
-            assert!(matches!(ioerror.kind(), ErrorKind::PermissionDenied));
-            assert_eq!(num_failed, 2);
+        match batch_send(&sender, &packet_refs[..]) {
+            Ok(()) => panic!(),
+            Err(SendPktsError::IoError(ioerror, num_failed)) => {
+                assert_matches!(ioerror.kind(), ErrorKind::PermissionDenied);
+                assert_eq!(num_failed, 2);
+            }
         }
 
         // test intermediate failures for multi_target_send
@@ -340,11 +351,12 @@ mod tests {
             &ipv4broadcast,
             &ipv4local,
         ];
-        if let Err(SendPktsError::IoError(ioerror, num_failed)) =
-            multi_target_send(&sender, &packets[0], &dest_refs)
-        {
-            assert!(matches!(ioerror.kind(), ErrorKind::PermissionDenied));
-            assert_eq!(num_failed, 2);
+        match multi_target_send(&sender, &packets[0], &dest_refs) {
+            Ok(()) => panic!(),
+            Err(SendPktsError::IoError(ioerror, num_failed)) => {
+                assert_matches!(ioerror.kind(), ErrorKind::PermissionDenied);
+                assert_eq!(num_failed, 2);
+            }
         }
 
         // test leading and trailing failures for multi_target_send
@@ -355,11 +367,12 @@ mod tests {
             &ipv4local,
             &ipv4broadcast,
         ];
-        if let Err(SendPktsError::IoError(ioerror, num_failed)) =
-            multi_target_send(&sender, &packets[0], &dest_refs)
-        {
-            assert!(matches!(ioerror.kind(), ErrorKind::PermissionDenied));
-            assert_eq!(num_failed, 3);
+        match multi_target_send(&sender, &packets[0], &dest_refs) {
+            Ok(()) => panic!(),
+            Err(SendPktsError::IoError(ioerror, num_failed)) => {
+                assert_matches!(ioerror.kind(), ErrorKind::PermissionDenied);
+                assert_eq!(num_failed, 3);
+            }
         }
     }
 }

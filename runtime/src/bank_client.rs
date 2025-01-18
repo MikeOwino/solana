@@ -14,21 +14,23 @@ use {
         signature::{Keypair, Signature, Signer},
         signers::Signers,
         system_instruction,
-        transaction::{self, Transaction},
+        sysvar::{Sysvar, SysvarId},
+        transaction::{self, Transaction, VersionedTransaction},
         transport::{Result, TransportError},
     },
     std::{
-        convert::TryFrom,
         io,
         sync::{Arc, Mutex},
         thread::{sleep, Builder},
         time::{Duration, Instant},
     },
 };
+#[cfg(feature = "dev-context-only-utils")]
+use {crate::bank_forks::BankForks, solana_sdk::clock, std::sync::RwLock};
 
 pub struct BankClient {
     bank: Arc<Bank>,
-    transaction_sender: Mutex<Sender<Transaction>>,
+    transaction_sender: Mutex<Sender<VersionedTransaction>>,
 }
 
 impl Client for BankClient {
@@ -38,56 +40,19 @@ impl Client for BankClient {
 }
 
 impl AsyncClient for BankClient {
-    fn async_send_transaction(&self, transaction: Transaction) -> Result<Signature> {
-        let signature = transaction.signatures.get(0).cloned().unwrap_or_default();
+    fn async_send_versioned_transaction(
+        &self,
+        transaction: VersionedTransaction,
+    ) -> Result<Signature> {
+        let signature = transaction.signatures.first().cloned().unwrap_or_default();
         let transaction_sender = self.transaction_sender.lock().unwrap();
         transaction_sender.send(transaction).unwrap();
         Ok(signature)
     }
-
-    fn async_send_batch(&self, transactions: Vec<Transaction>) -> Result<()> {
-        for t in transactions {
-            self.async_send_transaction(t)?;
-        }
-        Ok(())
-    }
-
-    fn async_send_message<T: Signers>(
-        &self,
-        keypairs: &T,
-        message: Message,
-        recent_blockhash: Hash,
-    ) -> Result<Signature> {
-        let transaction = Transaction::new(keypairs, message, recent_blockhash);
-        self.async_send_transaction(transaction)
-    }
-
-    fn async_send_instruction(
-        &self,
-        keypair: &Keypair,
-        instruction: Instruction,
-        recent_blockhash: Hash,
-    ) -> Result<Signature> {
-        let message = Message::new(&[instruction], Some(&keypair.pubkey()));
-        self.async_send_message(&[keypair], message, recent_blockhash)
-    }
-
-    /// Transfer `lamports` from `keypair` to `pubkey`
-    fn async_transfer(
-        &self,
-        lamports: u64,
-        keypair: &Keypair,
-        pubkey: &Pubkey,
-        recent_blockhash: Hash,
-    ) -> Result<Signature> {
-        let transfer_instruction =
-            system_instruction::transfer(&keypair.pubkey(), pubkey, lamports);
-        self.async_send_instruction(keypair, transfer_instruction, recent_blockhash)
-    }
 }
 
 impl SyncClient for BankClient {
-    fn send_and_confirm_message<T: Signers>(
+    fn send_and_confirm_message<T: Signers + ?Sized>(
         &self,
         keypairs: &T,
         message: Message,
@@ -95,7 +60,7 @@ impl SyncClient for BankClient {
         let blockhash = self.bank.last_blockhash();
         let transaction = Transaction::new(keypairs, message, blockhash);
         self.bank.process_transaction(&transaction)?;
-        Ok(transaction.signatures.get(0).cloned().unwrap_or_default())
+        Ok(transaction.signatures.first().cloned().unwrap_or_default())
     }
 
     /// Create and process a transaction from a single instruction.
@@ -320,7 +285,7 @@ impl SyncClient for BankClient {
     }
 
     fn get_fee_for_message(&self, message: &Message) -> Result<u64> {
-        SanitizedMessage::try_from(message.clone())
+        SanitizedMessage::try_from_legacy_message(message.clone())
             .ok()
             .and_then(|sanitized_message| self.bank.get_fee_for_message(&sanitized_message))
             .ok_or_else(|| {
@@ -333,23 +298,22 @@ impl SyncClient for BankClient {
 }
 
 impl BankClient {
-    fn run(bank: &Bank, transaction_receiver: Receiver<Transaction>) {
+    fn run(bank: &Bank, transaction_receiver: Receiver<VersionedTransaction>) {
         while let Ok(tx) = transaction_receiver.recv() {
             let mut transactions = vec![tx];
             while let Ok(tx) = transaction_receiver.try_recv() {
                 transactions.push(tx);
             }
-            let _ = bank.try_process_transactions(transactions.iter());
+            let _ = bank.try_process_entry_transactions(transactions);
         }
     }
 
-    pub fn new_shared(bank: &Arc<Bank>) -> Self {
+    pub fn new_shared(bank: Arc<Bank>) -> Self {
         let (transaction_sender, transaction_receiver) = unbounded();
         let transaction_sender = Mutex::new(transaction_sender);
         let thread_bank = bank.clone();
-        let bank = bank.clone();
         Builder::new()
-            .name("solana-bank-client".to_string())
+            .name("solBankClient".to_string())
             .spawn(move || Self::run(&thread_bank, transaction_receiver))
             .unwrap();
         Self {
@@ -359,7 +323,36 @@ impl BankClient {
     }
 
     pub fn new(bank: Bank) -> Self {
-        Self::new_shared(&Arc::new(bank))
+        Self::new_shared(Arc::new(bank))
+    }
+
+    pub fn set_sysvar_for_tests<T: Sysvar + SysvarId>(&self, sysvar: &T) {
+        self.bank.set_sysvar_for_tests(sysvar);
+    }
+
+    #[cfg(feature = "dev-context-only-utils")]
+    pub fn advance_slot(
+        &mut self,
+        by: u64,
+        bank_forks: &RwLock<BankForks>,
+        collector_id: &Pubkey,
+    ) -> Option<Arc<Bank>> {
+        let new_bank = Bank::new_from_parent(
+            self.bank.clone(),
+            collector_id,
+            self.bank.slot().checked_add(by)?,
+        );
+        self.bank = bank_forks
+            .write()
+            .unwrap()
+            .insert(new_bank)
+            .clone_without_scheduler();
+
+        self.set_sysvar_for_tests(&clock::Clock {
+            slot: self.bank.slot(),
+            ..clock::Clock::default()
+        });
+        Some(self.bank.clone())
     }
 }
 
@@ -367,22 +360,27 @@ impl BankClient {
 mod tests {
     use {
         super::*,
-        solana_sdk::{genesis_config::create_genesis_config, instruction::AccountMeta},
+        solana_sdk::{
+            genesis_config::create_genesis_config, instruction::AccountMeta,
+            native_token::sol_to_lamports,
+        },
     };
 
     #[test]
     fn test_bank_client_new_with_keypairs() {
-        let (genesis_config, john_doe_keypair) = create_genesis_config(10_000);
+        let (genesis_config, john_doe_keypair) = create_genesis_config(sol_to_lamports(1.0));
         let john_pubkey = john_doe_keypair.pubkey();
         let jane_doe_keypair = Keypair::new();
         let jane_pubkey = jane_doe_keypair.pubkey();
         let doe_keypairs = vec![&john_doe_keypair, &jane_doe_keypair];
-        let bank = Bank::new_for_tests(&genesis_config);
-        let bank_client = BankClient::new(bank);
+        let bank = Bank::new_with_bank_forks_for_tests(&genesis_config).0;
+        let bank_client = BankClient::new_shared(bank);
+        let amount = genesis_config.rent.minimum_balance(0);
 
         // Create 2-2 Multisig Transfer instruction.
         let bob_pubkey = solana_sdk::pubkey::new_rand();
-        let mut transfer_instruction = system_instruction::transfer(&john_pubkey, &bob_pubkey, 42);
+        let mut transfer_instruction =
+            system_instruction::transfer(&john_pubkey, &bob_pubkey, amount);
         transfer_instruction
             .accounts
             .push(AccountMeta::new(jane_pubkey, true));
@@ -391,6 +389,6 @@ mod tests {
         bank_client
             .send_and_confirm_message(&doe_keypairs, message)
             .unwrap();
-        assert_eq!(bank_client.get_balance(&bob_pubkey).unwrap(), 42);
+        assert_eq!(bank_client.get_balance(&bob_pubkey).unwrap(), amount);
     }
 }

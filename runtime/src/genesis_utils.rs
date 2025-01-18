@@ -1,14 +1,16 @@
 use {
+    solana_accounts_db::inline_spl_token,
     solana_sdk::{
         account::{Account, AccountSharedData},
         feature::{self, Feature},
         feature_set::FeatureSet,
         fee_calculator::FeeRateGovernor,
         genesis_config::{ClusterType, GenesisConfig},
+        native_token::sol_to_lamports,
         pubkey::Pubkey,
         rent::Rent,
         signature::{Keypair, Signer},
-        stake::state::StakeState,
+        stake::state::StakeStateV2,
         system_program,
     },
     solana_stake_program::stake_state,
@@ -21,12 +23,13 @@ const VALIDATOR_LAMPORTS: u64 = 42;
 
 // fun fact: rustc is very close to make this const fn.
 pub fn bootstrap_validator_stake_lamports() -> u64 {
-    StakeState::get_rent_exempt_reserve(&Rent::default())
+    Rent::default().minimum_balance(StakeStateV2::size_of())
 }
 
 // Number of lamports automatically used for genesis accounts
 pub const fn genesis_sysvar_and_builtin_program_lamports() -> u64 {
-    const NUM_BUILTIN_PROGRAMS: u64 = 4;
+    const NUM_BUILTIN_PROGRAMS: u64 = 9;
+    const NUM_PRECOMPILES: u64 = 2;
     const FEES_SYSVAR_MIN_BALANCE: u64 = 946_560;
     const STAKE_HISTORY_MIN_BALANCE: u64 = 114_979_200;
     const CLOCK_SYSVAR_MIN_BALANCE: u64 = 1_169_280;
@@ -41,6 +44,7 @@ pub const fn genesis_sysvar_and_builtin_program_lamports() -> u64 {
         + EPOCH_SCHEDULE_SYSVAR_MIN_BALANCE
         + RECENT_BLOCKHASHES_SYSVAR_MIN_BALANCE
         + NUM_BUILTIN_PROGRAMS
+        + NUM_PRECOMPILES
 }
 
 pub struct ValidatorVoteKeypairs {
@@ -75,7 +79,15 @@ pub struct GenesisConfigInfo {
 }
 
 pub fn create_genesis_config(mint_lamports: u64) -> GenesisConfigInfo {
-    create_genesis_config_with_leader(mint_lamports, &solana_sdk::pubkey::new_rand(), 0)
+    // Note that zero lamports for validator stake will result in stake account
+    // not being stored in accounts-db but still cached in bank stakes. This
+    // causes discrepancy between cached stakes accounts in bank and
+    // accounts-db which in particular will break snapshots test.
+    create_genesis_config_with_leader(
+        mint_lamports,
+        &solana_sdk::pubkey::new_rand(), // validator_pubkey
+        0,                               // validator_stake_lamports
+    )
 }
 
 pub fn create_genesis_config_with_vote_accounts(
@@ -101,8 +113,7 @@ pub fn create_genesis_config_with_vote_accounts_and_cluster_type(
     assert_eq!(voting_keypairs.len(), stakes.len());
 
     let mint_keypair = Keypair::new();
-    let voting_keypair =
-        Keypair::from_bytes(&voting_keypairs[0].borrow().vote_keypair.to_bytes()).unwrap();
+    let voting_keypair = voting_keypairs[0].borrow().vote_keypair.insecure_clone();
 
     let validator_pubkey = voting_keypairs[0].borrow().node_keypair.pubkey();
     let genesis_config = create_genesis_config_with_leader_ex(
@@ -188,16 +199,20 @@ pub fn create_genesis_config_with_leader(
 pub fn activate_all_features(genesis_config: &mut GenesisConfig) {
     // Activate all features at genesis in development mode
     for feature_id in FeatureSet::default().inactive {
-        genesis_config.accounts.insert(
-            feature_id,
-            Account::from(feature::create_account(
-                &Feature {
-                    activated_at: Some(0),
-                },
-                std::cmp::max(genesis_config.rent.minimum_balance(Feature::size_of()), 1),
-            )),
-        );
+        activate_feature(genesis_config, feature_id);
     }
+}
+
+pub fn activate_feature(genesis_config: &mut GenesisConfig, feature_id: Pubkey) {
+    genesis_config.accounts.insert(
+        feature_id,
+        Account::from(feature::create_account(
+            &Feature {
+                activated_at: Some(0),
+            },
+            std::cmp::max(genesis_config.rent.minimum_balance(Feature::size_of()), 1),
+        )),
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -239,6 +254,15 @@ pub fn create_genesis_config_with_leader_ex(
     ));
     initial_accounts.push((*validator_vote_account_pubkey, validator_vote_account));
     initial_accounts.push((*validator_stake_account_pubkey, validator_stake_account));
+
+    let native_mint_account = solana_sdk::account::AccountSharedData::from(Account {
+        owner: inline_spl_token::id(),
+        data: inline_spl_token::native_mint::ACCOUNT_DATA.to_vec(),
+        lamports: sol_to_lamports(1.),
+        executable: false,
+        rent_epoch: 1,
+    });
+    initial_accounts.push((inline_spl_token::native_mint::id(), native_mint_account));
 
     let mut genesis_config = GenesisConfig {
         accounts: initial_accounts

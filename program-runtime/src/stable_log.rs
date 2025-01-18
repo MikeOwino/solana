@@ -4,8 +4,9 @@
 //! of program logging
 use {
     crate::{ic_logger_msg, log_collector::LogCollector},
+    base64::{prelude::BASE64_STANDARD, Engine},
     itertools::Itertools,
-    solana_sdk::{instruction::InstructionError, pubkey::Pubkey},
+    solana_sdk::pubkey::Pubkey,
     std::{cell::RefCell, rc::Rc},
 };
 
@@ -55,7 +56,7 @@ pub fn program_data(log_collector: &Option<Rc<RefCell<LogCollector>>>, data: &[&
     ic_logger_msg!(
         log_collector,
         "Program data: {}",
-        data.iter().map(base64::encode).join(" ")
+        data.iter().map(|v| BASE64_STANDARD.encode(v)).join(" ")
     );
 }
 
@@ -78,7 +79,7 @@ pub fn program_return(
         log_collector,
         "Program return: {} {}",
         program_id,
-        base64::encode(data)
+        BASE64_STANDARD.encode(data)
     );
 }
 
@@ -100,10 +101,10 @@ pub fn program_success(log_collector: &Option<Rc<RefCell<LogCollector>>>, progra
 /// ```notrust
 /// "Program <address> failed: <program error details>"
 /// ```
-pub fn program_failure(
+pub fn program_failure<E: std::fmt::Display>(
     log_collector: &Option<Rc<RefCell<LogCollector>>>,
     program_id: &Pubkey,
-    err: &InstructionError,
+    err: &E,
 ) {
     ic_logger_msg!(log_collector, "Program {} failed: {}", program_id, err);
 }

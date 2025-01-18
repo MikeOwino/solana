@@ -2,20 +2,23 @@ use {
     crate::{
         hash::Hash,
         instruction::CompiledInstruction,
-        message::{legacy::Message as LegacyMessage, MessageHeader},
+        message::{legacy::Message as LegacyMessage, v0::MessageAddressTableLookup, MessageHeader},
         pubkey::Pubkey,
         sanitize::{Sanitize, SanitizeError},
         short_vec,
     },
     serde::{
-        de::{self, Deserializer, SeqAccess, Visitor},
+        de::{self, Deserializer, SeqAccess, Unexpected, Visitor},
         ser::{SerializeTuple, Serializer},
         Deserialize, Serialize,
     },
     std::fmt,
 };
 
+mod sanitized;
 pub mod v0;
+
+pub use sanitized::*;
 
 /// Bit mask that indicates whether a serialized message is versioned.
 pub const MESSAGE_VERSION_PREFIX: u8 = 0x80;
@@ -36,6 +39,13 @@ pub enum VersionedMessage {
 }
 
 impl VersionedMessage {
+    pub fn sanitize(&self) -> Result<(), SanitizeError> {
+        match self {
+            Self::Legacy(message) => message.sanitize(),
+            Self::V0(message) => message.sanitize(),
+        }
+    }
+
     pub fn header(&self) -> &MessageHeader {
         match self {
             Self::Legacy(message) => &message.header,
@@ -48,6 +58,55 @@ impl VersionedMessage {
             Self::Legacy(message) => &message.account_keys,
             Self::V0(message) => &message.account_keys,
         }
+    }
+
+    pub fn address_table_lookups(&self) -> Option<&[MessageAddressTableLookup]> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::V0(message) => Some(&message.address_table_lookups),
+        }
+    }
+
+    /// Returns true if the account at the specified index signed this
+    /// message.
+    pub fn is_signer(&self, index: usize) -> bool {
+        index < usize::from(self.header().num_required_signatures)
+    }
+
+    /// Returns true if the account at the specified index is writable by the
+    /// instructions in this message. Since dynamically loaded addresses can't
+    /// have write locks demoted without loading addresses, this shouldn't be
+    /// used in the runtime.
+    pub fn is_maybe_writable(&self, index: usize) -> bool {
+        match self {
+            Self::Legacy(message) => message.is_maybe_writable(index),
+            Self::V0(message) => message.is_maybe_writable(index),
+        }
+    }
+
+    /// Returns true if the account at the specified index is an input to some
+    /// program instruction in this message.
+    fn is_key_passed_to_program(&self, key_index: usize) -> bool {
+        if let Ok(key_index) = u8::try_from(key_index) {
+            self.instructions()
+                .iter()
+                .any(|ix| ix.accounts.contains(&key_index))
+        } else {
+            false
+        }
+    }
+
+    pub fn is_invoked(&self, key_index: usize) -> bool {
+        match self {
+            Self::Legacy(message) => message.is_key_called_as_program(key_index),
+            Self::V0(message) => message.is_key_called_as_program(key_index),
+        }
+    }
+
+    /// Returns true if the account at the specified index is not invoked as a
+    /// program or, if invoked, is passed to a program.
+    pub fn is_non_loader_key(&self, key_index: usize) -> bool {
+        !self.is_invoked(key_index) || self.is_key_passed_to_program(key_index)
     }
 
     pub fn recent_blockhash(&self) -> &Hash {
@@ -64,6 +123,8 @@ impl VersionedMessage {
         }
     }
 
+    /// Program instructions that will be executed in sequence and committed in
+    /// one atomic transaction if all succeed.
     pub fn instructions(&self) -> &[CompiledInstruction] {
         match self {
             Self::Legacy(message) => &message.instructions,
@@ -87,22 +148,13 @@ impl VersionedMessage {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"solana-tx-message-v1");
         hasher.update(message_bytes);
-        Hash(<[u8; crate::hash::HASH_BYTES]>::try_from(hasher.finalize().as_slice()).unwrap())
+        Hash(hasher.finalize().into())
     }
 }
 
 impl Default for VersionedMessage {
     fn default() -> Self {
         Self::Legacy(LegacyMessage::default())
-    }
-}
-
-impl Sanitize for VersionedMessage {
-    fn sanitize(&self) -> Result<(), SanitizeError> {
-        match self {
-            Self::Legacy(message) => message.sanitize(),
-            Self::V0(message) => message.sanitize(),
-        }
     }
 }
 
@@ -146,7 +198,16 @@ impl<'de> Deserialize<'de> for MessagePrefix {
                 formatter.write_str("message prefix byte")
             }
 
-            fn visit_u8<E>(self, byte: u8) -> Result<MessagePrefix, E> {
+            // Serde's integer visitors bubble up to u64 so check the prefix
+            // with this function instead of visit_u8. This approach is
+            // necessary because serde_json directly calls visit_u64 for
+            // unsigned integers.
+            fn visit_u64<E: de::Error>(self, value: u64) -> Result<MessagePrefix, E> {
+                if value > u8::MAX as u64 {
+                    Err(de::Error::invalid_type(Unexpected::Unsigned(value), &self))?;
+                }
+
+                let byte = value as u8;
                 if byte & MESSAGE_VERSION_PREFIX != 0 {
                     Ok(MessagePrefix::Versioned(byte & !MESSAGE_VERSION_PREFIX))
                 } else {
@@ -214,18 +275,26 @@ impl<'de> Deserialize<'de> for VersionedMessage {
                         }))
                     }
                     MessagePrefix::Versioned(version) => {
-                        if version == 0 {
-                            Ok(VersionedMessage::V0(seq.next_element()?.ok_or_else(
-                                || {
-                                    // will never happen since tuple length is always 2
-                                    de::Error::invalid_length(1, &self)
-                                },
-                            )?))
-                        } else {
-                            Err(de::Error::invalid_value(
+                        match version {
+                            0 => {
+                                Ok(VersionedMessage::V0(seq.next_element()?.ok_or_else(
+                                    || {
+                                        // will never happen since tuple length is always 2
+                                        de::Error::invalid_length(1, &self)
+                                    },
+                                )?))
+                            }
+                            127 => {
+                                // 0xff is used as the first byte of the off-chain messages
+                                // which corresponds to version 127 of the versioned messages.
+                                // This explicit check is added to prevent the usage of version 127
+                                // in the runtime as a valid transaction.
+                                Err(de::Error::custom("off-chain messages are not accepted"))
+                            }
+                            _ => Err(de::Error::invalid_value(
                                 de::Unexpected::Unsigned(version as u64),
-                                &"supported versions: [0]",
-                            ))
+                                &"a valid transaction message version",
+                            )),
                         }
                     }
                 }
@@ -271,26 +340,32 @@ mod tests {
 
         let mut message = LegacyMessage::new(&instructions, Some(&id1));
         message.recent_blockhash = Hash::new_unique();
+        let wrapped_message = VersionedMessage::Legacy(message.clone());
 
-        let bytes1 = bincode::serialize(&message).unwrap();
-        let bytes2 = bincode::serialize(&VersionedMessage::Legacy(message.clone())).unwrap();
+        // bincode
+        {
+            let bytes = bincode::serialize(&message).unwrap();
+            assert_eq!(bytes, bincode::serialize(&wrapped_message).unwrap());
 
-        assert_eq!(bytes1, bytes2);
+            let message_from_bytes: LegacyMessage = bincode::deserialize(&bytes).unwrap();
+            let wrapped_message_from_bytes: VersionedMessage =
+                bincode::deserialize(&bytes).unwrap();
 
-        let message1: LegacyMessage = bincode::deserialize(&bytes1).unwrap();
-        let message2: VersionedMessage = bincode::deserialize(&bytes2).unwrap();
+            assert_eq!(message, message_from_bytes);
+            assert_eq!(wrapped_message, wrapped_message_from_bytes);
+        }
 
-        if let VersionedMessage::Legacy(message2) = message2 {
-            assert_eq!(message, message1);
-            assert_eq!(message1, message2);
-        } else {
-            panic!("should deserialize to legacy message");
+        // serde_json
+        {
+            let string = serde_json::to_string(&message).unwrap();
+            let message_from_string: LegacyMessage = serde_json::from_str(&string).unwrap();
+            assert_eq!(message, message_from_string);
         }
     }
 
     #[test]
     fn test_versioned_message_serialization() {
-        let message = v0::Message {
+        let message = VersionedMessage::V0(v0::Message {
             header: MessageHeader {
                 num_required_signatures: 1,
                 num_readonly_signed_accounts: 0,
@@ -315,15 +390,14 @@ mod tests {
                 accounts: vec![0, 2, 3, 4],
                 data: vec![],
             }],
-        };
+        });
 
-        let bytes = bincode::serialize(&VersionedMessage::V0(message.clone())).unwrap();
+        let bytes = bincode::serialize(&message).unwrap();
         let message_from_bytes: VersionedMessage = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(message, message_from_bytes);
 
-        if let VersionedMessage::V0(message_from_bytes) = message_from_bytes {
-            assert_eq!(message, message_from_bytes);
-        } else {
-            panic!("should deserialize to versioned message");
-        }
+        let string = serde_json::to_string(&message).unwrap();
+        let message_from_string: VersionedMessage = serde_json::from_str(&string).unwrap();
+        assert_eq!(message, message_from_string);
     }
 }

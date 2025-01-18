@@ -5,14 +5,14 @@ use {
     },
     clap::ArgMatches,
     solana_clap_utils::{input_parsers::lamports_of_sol, offline::SIGN_ONLY_ARG},
-    solana_client::rpc_client::RpcClient,
+    solana_rpc_client::rpc_client::RpcClient,
     solana_sdk::{
         commitment_config::CommitmentConfig, hash::Hash, message::Message,
         native_token::lamports_to_sol, pubkey::Pubkey,
     },
 };
 
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum SpendAmount {
     All,
     Some(u64),
@@ -161,7 +161,7 @@ where
             dummy_message.recent_blockhash = *blockhash;
             get_fee_for_messages(rpc_client, &[&dummy_message])?
         }
-        None => 0, // Offline, cannot calulate fee
+        None => 0, // Offline, cannot calculate fee
     };
 
     match amount {

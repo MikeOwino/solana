@@ -1,16 +1,15 @@
 use {
     crate::{
         args::{DistributeTokensArgs, SplTokenArgs},
-        commands::{get_fees_for_messages, Allocation, Error, FundingSource},
+        commands::{get_fee_estimate_for_messages, Error, FundingSource, TypedAllocation},
     },
     console::style,
-    solana_account_decoder::parse_token::{
-        pubkey_from_spl_token, real_number_string, real_number_string_trimmed, spl_token_pubkey,
-    },
-    solana_client::rpc_client::RpcClient,
+    solana_account_decoder::parse_token::{real_number_string, real_number_string_trimmed},
+    solana_rpc_client::rpc_client::RpcClient,
     solana_sdk::{instruction::Instruction, message::Message, native_token::lamports_to_sol},
-    solana_transaction_status::parse_token::spl_token_instruction,
-    spl_associated_token_account::{create_associated_token_account, get_associated_token_address},
+    spl_associated_token_account::{
+        get_associated_token_address, instruction::create_associated_token_account,
+    },
     spl_token::{
         solana_program::program_pack::Pack,
         state::{Account as SplTokenAccount, Mint},
@@ -22,9 +21,7 @@ pub fn update_token_args(client: &RpcClient, args: &mut Option<SplTokenArgs>) ->
         let sender_account = client
             .get_account(&spl_token_args.token_account_address)
             .unwrap_or_default();
-        let mint_address =
-            pubkey_from_spl_token(&SplTokenAccount::unpack(&sender_account.data)?.mint);
-        spl_token_args.mint = mint_address;
+        spl_token_args.mint = SplTokenAccount::unpack(&sender_account.data)?.mint;
         update_decimals(client, args)?;
     }
     Ok(())
@@ -39,12 +36,8 @@ pub fn update_decimals(client: &RpcClient, args: &mut Option<SplTokenArgs>) -> R
     Ok(())
 }
 
-pub fn spl_token_amount(amount: f64, decimals: u8) -> u64 {
-    (amount * 10_usize.pow(decimals as u32) as f64) as u64
-}
-
-pub fn build_spl_token_instructions(
-    allocation: &Allocation,
+pub(crate) fn build_spl_token_instructions(
+    allocation: &TypedAllocation,
     args: &DistributeTokensArgs,
     do_create_associated_token_account: bool,
 ) -> Vec<Instruction> {
@@ -52,38 +45,37 @@ pub fn build_spl_token_instructions(
         .spl_token_args
         .as_ref()
         .expect("spl_token_args must be some");
-    let wallet_address = allocation.recipient.parse().unwrap();
+    let wallet_address = allocation.recipient;
     let associated_token_address =
-        get_associated_token_address(&wallet_address, &spl_token_pubkey(&spl_token_args.mint));
+        get_associated_token_address(&wallet_address, &spl_token_args.mint);
     let mut instructions = vec![];
     if do_create_associated_token_account {
-        let create_associated_token_account_instruction = create_associated_token_account(
-            &spl_token_pubkey(&args.fee_payer.pubkey()),
+        instructions.push(create_associated_token_account(
+            &args.fee_payer.pubkey(),
             &wallet_address,
-            &spl_token_pubkey(&spl_token_args.mint),
-        );
-        instructions.push(spl_token_instruction(
-            create_associated_token_account_instruction,
+            &spl_token_args.mint,
+            &spl_token::id(),
         ));
     }
-    let spl_instruction = spl_token::instruction::transfer_checked(
-        &spl_token::id(),
-        &spl_token_pubkey(&spl_token_args.token_account_address),
-        &spl_token_pubkey(&spl_token_args.mint),
-        &associated_token_address,
-        &spl_token_pubkey(&args.sender_keypair.pubkey()),
-        &[],
-        allocation.amount,
-        spl_token_args.decimals,
-    )
-    .unwrap();
-    instructions.push(spl_token_instruction(spl_instruction));
+    instructions.push(
+        spl_token::instruction::transfer_checked(
+            &spl_token::id(),
+            &spl_token_args.token_account_address,
+            &spl_token_args.mint,
+            &associated_token_address,
+            &args.sender_keypair.pubkey(),
+            &[],
+            allocation.amount,
+            spl_token_args.decimals,
+        )
+        .unwrap(),
+    );
     instructions
 }
 
-pub fn check_spl_token_balances(
+pub(crate) fn check_spl_token_balances(
     messages: &[Message],
-    allocations: &[Allocation],
+    allocations: &[TypedAllocation],
     client: &RpcClient,
     args: &DistributeTokensArgs,
     created_accounts: u64,
@@ -93,7 +85,7 @@ pub fn check_spl_token_balances(
         .as_ref()
         .expect("spl_token_args must be some");
     let allocation_amount: u64 = allocations.iter().map(|x| x.amount).sum();
-    let fees = get_fees_for_messages(messages, client)?;
+    let fees = get_fee_estimate_for_messages(messages, client)?;
 
     let token_account_rent_exempt_balance =
         client.get_minimum_balance_for_rent_exemption(SplTokenAccount::LEN)?;
@@ -118,19 +110,16 @@ pub fn check_spl_token_balances(
     Ok(())
 }
 
-pub fn print_token_balances(
+pub(crate) fn print_token_balances(
     client: &RpcClient,
-    allocation: &Allocation,
+    allocation: &TypedAllocation,
     spl_token_args: &SplTokenArgs,
 ) -> Result<(), Error> {
-    let address = allocation.recipient.parse().unwrap();
+    let address = allocation.recipient;
     let expected = allocation.amount;
-    let associated_token_address = get_associated_token_address(
-        &spl_token_pubkey(&address),
-        &spl_token_pubkey(&spl_token_args.mint),
-    );
+    let associated_token_address = get_associated_token_address(&address, &spl_token_args.mint);
     let recipient_account = client
-        .get_account(&pubkey_from_spl_token(&associated_token_address))
+        .get_account(&associated_token_address)
         .unwrap_or_default();
     let (actual, difference) = if let Ok(recipient_token) =
         SplTokenAccount::unpack(&recipient_account.data)
@@ -139,8 +128,8 @@ pub fn print_token_balances(
         let delta_string =
             real_number_string(recipient_token.amount - expected, spl_token_args.decimals);
         (
-            style(format!("{:>24}", actual_ui_amount)),
-            format!("{:>24}", delta_string),
+            style(format!("{actual_ui_amount:>24}")),
+            format!("{delta_string:>24}"),
         )
     } else {
         (

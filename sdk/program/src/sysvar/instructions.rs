@@ -1,5 +1,34 @@
-#![allow(clippy::integer_arithmetic)]
-//! This account contains the serialized transaction instructions
+//! The serialized instructions of the current transaction.
+//!
+//! The _instructions sysvar_ provides access to the serialized instruction data
+//! for the currently-running transaction. This allows for [instruction
+//! introspection][in], which is required for correctly interoperating with
+//! native programs like the [secp256k1] and [ed25519] programs.
+//!
+//! [in]: https://docs.solanalabs.com/implemented-proposals/instruction_introspection
+//! [secp256k1]: crate::secp256k1_program
+//! [ed25519]: crate::ed25519_program
+//!
+//! Unlike other sysvars, the data in the instructions sysvar is not accessed
+//! through a type that implements the [`Sysvar`] trait. Instead, the
+//! instruction sysvar is accessed through several free functions within this
+//! module.
+//!
+//! [`Sysvar`]: crate::sysvar::Sysvar
+//!
+//! See also the Solana [documentation on the instructions sysvar][sdoc].
+//!
+//! [sdoc]: https://docs.solanalabs.com/runtime/sysvars#instructions
+//!
+//! # Examples
+//!
+//! For a complete example of how the instructions sysvar is used see the
+//! documentation for [`secp256k1_instruction`] in the `solana-sdk` crate.
+//!
+//! [`secp256k1_instruction`]: https://docs.rs/solana-sdk/latest/solana_sdk/secp256k1_instruction/index.html
+
+#![allow(clippy::arithmetic_side_effects)]
+
 use crate::{
     account_info::AccountInfo,
     instruction::{AccountMeta, Instruction},
@@ -8,19 +37,30 @@ use crate::{
     sanitize::SanitizeError,
     serialize_utils::{read_pubkey, read_slice, read_u16, read_u8},
 };
-#[cfg(not(target_arch = "bpf"))]
+#[cfg(not(target_os = "solana"))]
 use {
     crate::serialize_utils::{append_slice, append_u16, append_u8},
     bitflags::bitflags,
 };
 
-// Instructions Sysvar, dummy type, use the associated helpers instead of the Sysvar trait
+/// Instructions sysvar, dummy type.
+///
+/// This type exists for consistency with other sysvar modules, but is a dummy
+/// type that does not contain sysvar data. It implements the [`SysvarId`] trait
+/// but does not implement the [`Sysvar`] trait.
+///
+/// [`SysvarId`]: crate::sysvar::SysvarId
+/// [`Sysvar`]: crate::sysvar::Sysvar
+///
+/// Use the free functions in this module to access the instructions sysvar.
 pub struct Instructions();
 
 crate::declare_sysvar_id!("Sysvar1nstructions1111111111111111111111111", Instructions);
 
-// Construct the account data for the Instructions Sysvar
-#[cfg(not(target_arch = "bpf"))]
+/// Construct the account data for the instructions sysvar.
+///
+/// This function is used by the runtime and not available to Solana programs.
+#[cfg(not(target_os = "solana"))]
 pub fn construct_instructions_data(instructions: &[BorrowedInstruction]) -> Vec<u8> {
     let mut data = serialize_instructions(instructions);
     // add room for current instruction index.
@@ -29,24 +69,29 @@ pub fn construct_instructions_data(instructions: &[BorrowedInstruction]) -> Vec<
     data
 }
 
-/// Borrowed version of AccountMeta
+/// Borrowed version of `AccountMeta`.
+///
+/// This struct is used by the runtime when constructing the sysvar. It is not
+/// useful to Solana programs.
 pub struct BorrowedAccountMeta<'a> {
     pub pubkey: &'a Pubkey,
     pub is_signer: bool,
     pub is_writable: bool,
 }
 
-/// Borrowed version of Instruction
+/// Borrowed version of `Instruction`.
+///
+/// This struct is used by the runtime when constructing the sysvar. It is not
+/// useful to Solana programs.
 pub struct BorrowedInstruction<'a> {
     pub program_id: &'a Pubkey,
     pub accounts: Vec<BorrowedAccountMeta<'a>>,
     pub data: &'a [u8],
 }
 
-#[cfg(not(target_arch = "bpf"))]
+#[cfg(not(target_os = "solana"))]
 bitflags! {
     struct InstructionsSysvarAccountMeta: u8 {
-        const NONE = 0b00000000;
         const IS_SIGNER = 0b00000001;
         const IS_WRITABLE = 0b00000010;
     }
@@ -65,7 +110,7 @@ bitflags! {
 //   35..67 - program_id
 //   67..69 - data len - u16
 //   69..data_len - data
-#[cfg(not(target_arch = "bpf"))]
+#[cfg(not(target_os = "solana"))]
 fn serialize_instructions(instructions: &[BorrowedInstruction]) -> Vec<u8> {
     // 64 bytes is a reasonable guess, calculating exactly is slower in benchmarks
     let mut data = Vec::with_capacity(instructions.len() * (32 * 2));
@@ -80,7 +125,7 @@ fn serialize_instructions(instructions: &[BorrowedInstruction]) -> Vec<u8> {
         data[start..start + 2].copy_from_slice(&start_instruction_offset.to_le_bytes());
         append_u16(&mut data, instruction.accounts.len() as u16);
         for account_meta in &instruction.accounts {
-            let mut account_meta_flags = InstructionsSysvarAccountMeta::NONE;
+            let mut account_meta_flags = InstructionsSysvarAccountMeta::empty();
             if account_meta.is_signer {
                 account_meta_flags |= InstructionsSysvarAccountMeta::IS_SIGNER;
             }
@@ -99,7 +144,9 @@ fn serialize_instructions(instructions: &[BorrowedInstruction]) -> Vec<u8> {
 }
 
 /// Load the current `Instruction`'s index in the currently executing
-/// `Transaction` from the Instructions Sysvar data
+/// `Transaction`.
+///
+/// `data` is the instructions sysvar account data.
 #[deprecated(
     since = "1.8.0",
     note = "Unsafe because the sysvar accounts address is not checked, please use `load_current_index_checked` instead"
@@ -112,7 +159,11 @@ pub fn load_current_index(data: &[u8]) -> u16 {
 }
 
 /// Load the current `Instruction`'s index in the currently executing
-/// `Transaction`
+/// `Transaction`.
+///
+/// # Errors
+///
+/// Returns [`ProgramError::UnsupportedSysvar`] if the given account's ID is not equal to [`ID`].
 pub fn load_current_index_checked(
     instruction_sysvar_account_info: &AccountInfo,
 ) -> Result<u16, ProgramError> {
@@ -127,7 +178,7 @@ pub fn load_current_index_checked(
     Ok(u16::from_le_bytes(instr_fixed_data))
 }
 
-/// Store the current `Instruction`'s index in the Instructions Sysvar data
+/// Store the current `Instruction`'s index in the instructions sysvar data.
 pub fn store_current_index(data: &mut [u8], instruction_index: u16) {
     let last_index = data.len() - 2;
     data[last_index..last_index + 2].copy_from_slice(&instruction_index.to_le_bytes());
@@ -178,7 +229,9 @@ fn deserialize_instruction(index: usize, data: &[u8]) -> Result<Instruction, San
 }
 
 /// Load an `Instruction` in the currently executing `Transaction` at the
-/// specified index
+/// specified index.
+///
+/// `data` is the instructions sysvar account data.
 #[deprecated(
     since = "1.8.0",
     note = "Unsafe because the sysvar accounts address is not checked, please use `load_instruction_at_checked` instead"
@@ -188,7 +241,11 @@ pub fn load_instruction_at(index: usize, data: &[u8]) -> Result<Instruction, San
 }
 
 /// Load an `Instruction` in the currently executing `Transaction` at the
-/// specified index
+/// specified index.
+///
+/// # Errors
+///
+/// Returns [`ProgramError::UnsupportedSysvar`] if the given account's ID is not equal to [`ID`].
 pub fn load_instruction_at_checked(
     index: usize,
     instruction_sysvar_account_info: &AccountInfo,
@@ -205,7 +262,11 @@ pub fn load_instruction_at_checked(
 }
 
 /// Returns the `Instruction` relative to the current `Instruction` in the
-/// currently executing `Transaction`
+/// currently executing `Transaction`.
+///
+/// # Errors
+///
+/// Returns [`ProgramError::UnsupportedSysvar`] if the given account's ID is not equal to [`ID`].
 pub fn get_instruction_relative(
     index_relative_to_current: i64,
     instruction_sysvar_account_info: &AccountInfo,
@@ -241,8 +302,11 @@ mod tests {
             message::{Message as LegacyMessage, SanitizedMessage},
             pubkey::Pubkey,
         },
-        std::convert::TryFrom,
     };
+
+    fn new_sanitized_message(message: LegacyMessage) -> SanitizedMessage {
+        SanitizedMessage::try_from_legacy_message(message).unwrap()
+    }
 
     #[test]
     fn test_load_store_instruction() {
@@ -266,11 +330,11 @@ mod tests {
             &0,
             vec![AccountMeta::new(Pubkey::new_unique(), false)],
         );
-        let sanitized_message = SanitizedMessage::try_from(LegacyMessage::new(
+        let message = LegacyMessage::new(
             &[instruction0.clone(), instruction1.clone()],
             Some(&Pubkey::new_unique()),
-        ))
-        .unwrap();
+        );
+        let sanitized_message = new_sanitized_message(message);
 
         let key = id();
         let mut lamports = 0;
@@ -320,11 +384,9 @@ mod tests {
             &0,
             vec![AccountMeta::new(Pubkey::new_unique(), false)],
         );
-        let sanitized_message = SanitizedMessage::try_from(LegacyMessage::new(
-            &[instruction0, instruction1],
-            Some(&Pubkey::new_unique()),
-        ))
-        .unwrap();
+        let message =
+            LegacyMessage::new(&[instruction0, instruction1], Some(&Pubkey::new_unique()));
+        let sanitized_message = new_sanitized_message(message);
 
         let key = id();
         let mut lamports = 0;
@@ -374,15 +436,15 @@ mod tests {
             &0,
             vec![AccountMeta::new(Pubkey::new_unique(), false)],
         );
-        let sanitized_message = SanitizedMessage::try_from(LegacyMessage::new(
+        let message = LegacyMessage::new(
             &[
                 instruction0.clone(),
                 instruction1.clone(),
                 instruction2.clone(),
             ],
             Some(&Pubkey::new_unique()),
-        ))
-        .unwrap();
+        );
+        let sanitized_message = new_sanitized_message(message);
 
         let key = id();
         let mut lamports = 0;
@@ -477,7 +539,7 @@ mod tests {
         ];
 
         let message = LegacyMessage::new(&instructions, Some(&id1));
-        let sanitized_message = SanitizedMessage::try_from(message).unwrap();
+        let sanitized_message = new_sanitized_message(message);
         let serialized = serialize_instructions(&sanitized_message.decompile_instructions());
 
         // assert that deserialize_instruction is compatible with SanitizedMessage::serialize_instructions
@@ -499,9 +561,9 @@ mod tests {
             Instruction::new_with_bincode(program_id0, &0, vec![AccountMeta::new(id1, true)]),
         ];
 
-        let message =
-            SanitizedMessage::try_from(LegacyMessage::new(&instructions, Some(&id1))).unwrap();
-        let serialized = serialize_instructions(&message.decompile_instructions());
+        let message = LegacyMessage::new(&instructions, Some(&id1));
+        let sanitized_message = new_sanitized_message(message);
+        let serialized = serialize_instructions(&sanitized_message.decompile_instructions());
         assert_eq!(
             deserialize_instruction(instructions.len(), &serialized).unwrap_err(),
             SanitizeError::IndexOutOfBounds,
